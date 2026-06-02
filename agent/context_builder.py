@@ -280,6 +280,10 @@ def build_for_alert_grouping(alerts: list[dict]) -> tuple[dict, str]:
     dt       = _build_datetime_context()
     ctx_text = get_context_as_text()
 
+    # Build a short-ID → full-ID lookup so the LLM uses short IDs in its
+    # response but we can resolve back to full UUIDs when saving to DB.
+    id_map = {a['id'][:8]: a['id'] for a in alerts}
+
     formatted_alerts = []
     for a in alerts:
         formatted_alerts.append(
@@ -289,7 +293,6 @@ def build_for_alert_grouping(alerts: list[dict]) -> tuple[dict, str]:
 
     package = {
         "trigger_reason": "alert_grouping",
-        "alerts":         alerts,
         "datetime_ctx":   dt,
         "context_store":  ctx_text,
     }
@@ -300,6 +303,9 @@ ALERT NOISE REDUCTION REQUEST
 ═══════════════════════════════════════════════════════════════
 {len(alerts)} ACTIVE ALERTS FIRING RIGHT NOW:
 {chr(10).join(formatted_alerts)}
+
+IMPORTANT: Use the short IDs (e.g. "d93ef320") exactly as shown above
+in the alert_ids_grouped field of your response.
 
 CURRENT TIME: {dt['day_of_week']} {dt['time']} — {dt['time_of_day']}
 
@@ -312,6 +318,8 @@ Group these alerts into meaningful incidents. Suppress redundant noise.
 Identify the single root cause driving multiple alerts.
 Return JSON only.
 """
+    # Attach id_map to saved package so agent_loop can resolve full UUIDs
+    saved["_id_map"] = id_map
     return saved, prompt
 
 
@@ -335,8 +343,24 @@ def build_for_health_query(question: str) -> tuple[dict, str]:
             )
         past_text = "\n".join(lines)
 
-    # Get current service status for context
+    # Full live metrics — CPU, memory, throughput, error rate all included
+    # This prevents the agent from asking the user for data it already has
     all_svcs = _format_all_latest()
+
+    # Also pull latest raw metrics for richer per-service detail
+    latest_rows = get_latest_metric_per_service()
+    live_detail_lines = ["Service               | CPU % | Mem % | RT(ms) | Error% | Throughput | Status"]
+    live_detail_lines.append("-" * 85)
+    for r in latest_rows:
+        svc  = r["service_name"][:22].ljust(22)
+        cpu  = f"{r.get('cpu_pct', 0):.1f}"
+        mem  = f"{r.get('memory_pct', 0):.1f}"
+        rt   = f"{r.get('response_time_ms', 0):.0f}"
+        er   = f"{r.get('error_rate_pct', 0):.1f}"
+        tp   = f"{r.get('throughput_rps', 0):.0f}"
+        up   = "UP" if r.get("is_reachable", True) else "DOWN"
+        live_detail_lines.append(f"{svc} | {cpu:>5} | {mem:>5} | {rt:>6} | {er:>6} | {tp:>10} | {up}")
+    live_detail = "\n".join(live_detail_lines)
 
     package = {
         "trigger_reason": "health_query",
@@ -354,18 +378,22 @@ USER QUESTION: "{question}"
 
 QUERIED TIME RANGE: {since[:16]} to {until[:16]} UTC
 
+LIVE SERVICE METRICS RIGHT NOW (use this to answer current-state questions):
+{live_detail}
+
 PAST AGENT ANALYSES IN THIS PERIOD:
 {past_text}
 
-CURRENT SERVICE STATUS (for reference):
-{all_svcs}
+CURRENT TIME: {dt['day_of_week']}, {dt['date']} at {dt['time']} — {dt['time_of_day']}
 
 OPERATOR CONTEXT:
 ─────────────────────────────────────────────────────────────
 {ctx_text}
 ─────────────────────────────────────────────────────────────
 
-Answer the user's question directly and specifically. Return JSON only.
+IMPORTANT: All live metrics are provided above. Do NOT ask the user for
+CPU, memory, throughput, or response time data — it is already here.
+Answer the user's question directly using the data above. Return JSON only.
 """
     return saved, prompt
 

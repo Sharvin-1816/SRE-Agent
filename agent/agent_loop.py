@@ -17,6 +17,7 @@ Loop:
 
 import os
 import json
+import time
 from datetime import datetime, timezone
 from rich.console import Console
 from rich.panel import Panel
@@ -147,12 +148,27 @@ def _display_blast_radius(result: dict):
 
     safe = result.get("safe_services", [])
     if safe:
-        body += f"\n[bold green]Safe services:[/bold green] {', '.join(safe)}\n"
+        # LLM sometimes returns list of strings, sometimes list of dicts
+        safe_names = []
+        for s in safe:
+            if isinstance(s, dict):
+                safe_names.append(s.get("service", str(s)))
+            else:
+                safe_names.append(str(s))
+        body += f"\n[bold green]Safe services:[/bold green] {', '.join(safe_names)}\n"
 
     cbs = result.get("recommended_circuit_breakers", [])
     if cbs:
         body += "\n[bold]Circuit breakers to activate:[/bold]\n"
-        body += "\n".join(f"  • {c}" for c in cbs)
+        # Same defensive handling for circuit breakers
+        for c in cbs:
+            body += f"  • {c if isinstance(c, str) else c.get('action', str(c))}\n"
+
+    fix = result.get("fix_suggestions", [])
+    if fix:
+        body += "\n[bold green]Fix suggestions:[/bold green]\n"
+        for i, f in enumerate(fix, 1):
+            body += f"  {i}. {f if isinstance(f, str) else str(f)}\n"
 
     console.print(Panel(body, title="[bold red]💥 Blast Radius Estimation[/bold red]", border_style="red"))
 
@@ -278,6 +294,9 @@ def run_alert_grouping() -> dict:
     console.print(f"  Found {len(alerts)} ungrouped alerts.")
     pkg, prompt = build_for_alert_grouping(alerts)
 
+    # Retrieve the short→full UUID map attached by context_builder
+    id_map = pkg.pop("_id_map", {})
+
     raw    = ask_llm(ALERT_GROUPING_SYSTEM, prompt)
     result = parse_json_response(raw)
 
@@ -286,17 +305,21 @@ def run_alert_grouping() -> dict:
 
     _display_alert_grouping(result)
 
-    # Persist grouped incidents
+    # Persist grouped incidents — resolve short IDs → full UUIDs before saving
     for inc in result.get("incidents", []):
+        short_ids = inc.get("alert_ids_grouped", [])
+        # Resolve every short ID to its full UUID; skip any that don't resolve
+        full_ids = [id_map[sid] for sid in short_ids if sid in id_map]
+
         incident = insert_incident({
             "title":             inc["title"],
             "affected_services": inc["affected_services"],
-            "raw_alert_count":   len(inc.get("alert_ids_grouped", [])),
+            "raw_alert_count":   len(alerts),
             "suppressed_count":  inc.get("suppressed_count", 0),
             "status":            "open",
         })
-        if inc.get("alert_ids_grouped"):
-            mark_alerts_grouped(inc["alert_ids_grouped"], incident["id"])
+        if full_ids:
+            mark_alerts_grouped(full_ids, incident["id"])
 
     insert_agent_output({
         "context_package_id":  pkg["id"],
@@ -362,7 +385,12 @@ def run_blast_radius(service_name: str, signal: dict = None) -> dict:
 def run_agent(trigger: str, service_name: str = None, signal: dict = None):
     """
     Called by the collector when an anomaly is detected.
-    Runs RCA + prediction + blast radius automatically.
+    Runs RCA + prediction + blast radius + alert grouping.
+
+    Rate limiting: 3s delay between LLM calls to stay within
+    Groq free tier (8000 TPM). Each call uses ~1500-2000 tokens.
+    4 calls × 2000 tokens = 8000 tokens — right at the limit.
+    The delay lets the TPM window reset between calls.
     """
     console.rule(f"[bold red]AGENT TRIGGERED — {trigger.upper()}[/bold red]")
 
@@ -370,10 +398,33 @@ def run_agent(trigger: str, service_name: str = None, signal: dict = None):
         from db.database import get_latest_signal
         signal = get_latest_signal(service_name) or {}
 
-    # Always run these three on anomaly
-    run_rca(service_name, signal)
-    run_prediction(service_name, signal)
-    run_blast_radius(service_name, signal)
-    run_alert_grouping()
+    try:
+        run_rca(service_name, signal)
+    except Exception as e:
+        console.print(f"[red]  RCA failed: {e}[/red]")
+
+    console.print("[dim]  Waiting 4s before next LLM call (rate limit)...[/dim]")
+    time.sleep(4)
+
+    try:
+        run_prediction(service_name, signal)
+    except Exception as e:
+        console.print(f"[red]  Prediction failed: {e}[/red]")
+
+    console.print("[dim]  Waiting 4s before next LLM call (rate limit)...[/dim]")
+    time.sleep(4)
+
+    try:
+        run_blast_radius(service_name, signal)
+    except Exception as e:
+        console.print(f"[red]  Blast radius failed: {e}[/red]")
+
+    console.print("[dim]  Waiting 4s before next LLM call (rate limit)...[/dim]")
+    time.sleep(4)
+
+    try:
+        run_alert_grouping()
+    except Exception as e:
+        console.print(f"[red]  Alert grouping failed: {e}[/red]")
 
     console.rule("[bold green]AGENT ANALYSIS COMPLETE[/bold green]")

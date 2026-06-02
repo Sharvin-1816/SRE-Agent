@@ -239,13 +239,25 @@ def poll_all_services():
 
     _print_poll_summary(results)
 
-    # If anomalies found, trigger agent
+    # If anomalies found, only trigger agent for the WORST one per poll.
+    # Running 4 LLM calls × N anomalies hammers the Groq rate limit fast.
+    # The agent sees all correlated services in its context anyway, so
+    # analysing the worst anomaly captures the full picture.
     if anomalies:
-        console.print(f"\n[bold red]  {len(anomalies)} anomaly signal(s) detected — triggering agent...[/bold red]")
+        # Sort by max z-score descending, pick the worst
+        worst_service, worst_signal = max(
+            anomalies,
+            key=lambda x: x[1].get("metrics_snapshot", {}) and
+                max((v.get("z_score", 0) for v in x[1].get("metrics_snapshot", {}).values()), default=0)
+                if isinstance(x[1].get("metrics_snapshot"), dict) else 0
+        )
+        console.print(
+            f"\n[bold red]  {len(anomalies)} anomaly signal(s) detected — "
+            f"triggering agent for worst: {worst_service}[/bold red]"
+        )
         try:
             from agent.agent_loop import run_agent
-            for service_name, signal in anomalies:
-                run_agent(trigger="anomaly_detected", service_name=service_name)
+            run_agent(trigger="anomaly_detected", service_name=worst_service, signal=worst_signal)
         except Exception as e:
             console.print(f"[red]  Agent trigger failed: {e}[/red]")
 
