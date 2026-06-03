@@ -163,6 +163,16 @@ def cmd_simulate():
 
 def cmd_status():
     """Quick status of all services."""
+    # Show which data source is active
+    try:
+        from agent.prometheus_adapter import is_available as prom_ok
+        if prom_ok():
+            console.print("  [cyan]📡 Data source: Prometheus (p95/p99 available)[/cyan]")
+        else:
+            console.print("  [yellow]🗄 Data source: Supabase (Prometheus unavailable)[/yellow]")
+    except Exception:
+        console.print("  [yellow]🗄 Data source: Supabase[/yellow]")
+
     rows = get_latest_metric_per_service()
     if not rows:
         console.print("[yellow]  No metrics yet. Is the collector running?[/yellow]")

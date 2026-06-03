@@ -6,10 +6,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/LLM-Groq%20%2F%20Ollama-blue?style=flat-square"/>
-  <img src="https://img.shields.io/badge/DB-Supabase%20(PostgreSQL)-green?style=flat-square"/>
-  <img src="https://img.shields.io/badge/Backend-Python-yellow?style=flat-square"/>
-  <img src="https://img.shields.io/badge/Services-FastAPI-teal?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.0-blue?style=flat-square"/>
+  <img src="https://img.shields.io/badge/LLM-Groq%20%2F%20Ollama-orange?style=flat-square"/>
+  <img src="https://img.shields.io/badge/DB-Supabase-green?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Metrics-Prometheus-red?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Dashboard-Grafana-yellow?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Backend-Python-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square"/>
 </p>
 
@@ -28,6 +30,18 @@ The agent is **context-aware**. You tell it things like:
 > *"New movie releases on 9th April — expecting huge traffic"*
 
 The agent factors these into every prediction, RCA, and load forecast automatically. It doesn't just match patterns — it **reasons**.
+
+---
+
+## Versions
+
+### v2.0 — Current (Prometheus + Grafana)
+Full observability stack. Agent uses p50/p95/p99 latency from Prometheus instead of averages. Live Grafana dashboards show real-time service health.
+
+### v1.0 — Base Agent
+Core agentic loop with all 6 reasoning modes. No Prometheus — metrics sourced from Supabase only. Fully functional agent reasoning.
+
+See [Releases](../../releases) to download any version.
 
 ---
 
@@ -52,56 +66,67 @@ The agent factors these into every prediction, RCA, and load forecast automatica
 ┌─────────────────────────────────────────────────────────┐
 │           MOCK MICROSERVICES (FastAPI)                  │
 │  Payment · Cart · Notification · Auth · Inventory · GW  │
-│  Each exposes /health and /metrics                      │
-└──────────────────────┬──────────────────────────────────┘
-                       │ ping every 60s
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│           METRICS COLLECTOR (APScheduler)               │
-│  Stores raw metrics → Supabase                          │
+│  Each exposes /metrics (Prometheus) and /metrics/json   │
 └──────────────────────┬──────────────────────────────────┘
                        │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│           ANOMALY DETECTION ENGINE                      │
-│  Z-score baseline (per service, per time-of-day)        │
-│  Trend detection (rate of change, acceleration)         │
-│  Correlation check (are other services also degrading?) │
-│  → Produces plain-English LLM signal                    │
-└──────────────────────┬──────────────────────────────────┘
-                       │ on anomaly or every 5 min
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│           CONTEXT BUILDER                               │
-│  Last 30min metrics · 7-day history                     │
-│  Dependency map · Operator context · Date/time          │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│           AGENTIC LOOP                                  │
-│  1. OBSERVE  — ingest full context package              │
-│  2. REASON   — LLM first-pass analysis                  │
-│  3. GAPS?    — confidence < 75%? Ask user via CLI       │
-│  4. CONCLUDE — full structured JSON analysis            │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│           OUTPUT (6 MODULES)                            │
-│  RCA · Degradation Prediction · Load Prediction         │
-│  Alert Grouping · Health Query · Blast Radius           │
-│  + Actionable fix suggestions for every incident        │
-└─────────────────────────────────────────────────────────┘
+          ┌────────────┴────────────┐
+          ▼                         ▼
+┌──────────────────┐     ┌──────────────────────┐
+│   PROMETHEUS     │     │  COLLECTOR            │
+│   scrapes /metrics     │  (APScheduler)        │
+│   every 15s      │     │  pings /metrics/json  │
+│   p50/p95/p99    │     │  every 60s → Supabase │
+└────────┬─────────┘     └──────────┬───────────┘
+         │                          │
+         ▼                          ▼
+┌──────────────────┐     ┌──────────────────────┐
+│   GRAFANA        │     │  ANOMALY DETECTOR     │
+│   Live dashboards│     │  Z-score + trend      │
+│   port 3000      │     │  → triggers agent     │
+└──────────────────┘     └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │  CONTEXT BUILDER     │
+                         │  Prometheus metrics  │
+                         │  + Supabase history  │
+                         │  + Operator context  │
+                         │  + Dependency map    │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │  AGENTIC LOOP        │
+                         │  1. Observe          │
+                         │  2. Reason (LLM)     │
+                         │  3. Gaps? → Ask user │
+                         │  4. Conclude         │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │  OUTPUT (6 MODULES)  │
+                         │  RCA · Prediction    │
+                         │  Load · Alerts       │
+                         │  Health · Blast      │
+                         └──────────────────────┘
 ```
 
 ### Why Z-score instead of thresholds?
 
-A response time of 800ms at 3 AM is suspicious. The same 800ms during a Friday evening flash sale is normal. Fixed thresholds can't tell the difference. The anomaly engine builds a **rolling baseline per service per time-of-day window** and flags deviations in standard deviations — not absolute values. This means:
+A response time of 800ms at 3 AM is suspicious. The same 800ms during a Friday evening flash sale is normal. Fixed thresholds can't tell the difference. The anomaly engine builds a **rolling baseline per service per time-of-day window** and flags deviations in standard deviations — not absolute values.
 
-- Payment service (baseline 410ms) and Inventory service (baseline 620ms) have different normals
-- 3 AM baseline and 6 PM baseline for the same service are different
-- Gradual degradation over 40 minutes is caught even if no single reading spikes
+### Why Prometheus + Supabase together?
+
+| Prometheus | Supabase |
+|---|---|
+| Live p50/p95/p99 latency | Agent outputs (every LLM response) |
+| Real-time scraping every 15s | Anomaly events + z-score history |
+| Powers Grafana dashboards | Baseline profiles per service |
+| Agent live context | Operator context store |
+| | Health query history |
+
+Prometheus gives the agent richer data. Supabase gives it memory and history. Neither replaces the other.
 
 ### Why operator context matters
 
@@ -122,14 +147,16 @@ This lets the agent reason: *"Payment service is degrading AND a BOGO offer star
 | Layer | Technology | Purpose |
 |---|---|---|
 | Mock services | **FastAPI** (Python) | 6 simulated microservices with realistic failure modes |
-| Scheduler | **APScheduler** | Polls services every 60s, triggers anomaly checks |
-| Database | **Supabase (PostgreSQL)** | Time-series metrics, baselines, agent outputs |
-| Anomaly detection | **Pure Python (Z-score + linear regression)** | Context-aware anomaly detection without ML libraries |
+| Metrics collection | **Prometheus** | Scrapes all services every 15s, stores p50/p95/p99 |
+| Visualization | **Grafana** | Live dashboards — request rate, latency, errors, CPU |
+| Scheduler | **APScheduler** | Polls services every 60s, runs anomaly detection |
+| Database | **Supabase (PostgreSQL)** | Agent outputs, baselines, context, incidents |
+| Anomaly detection | **Pure Python (Z-score + linear regression)** | Context-aware, per-service, per-time-window |
 | LLM (primary) | **Groq API** — `llama-3.3-70b-versatile` | Fast, free-tier LLM inference |
-| LLM (fallback) | **Ollama** — local Llama 3.1 | Offline fallback if Groq is unavailable |
-| LLM adapter | **Custom Python swap layer** | Change LLM provider via one `.env` flag |
-| Agent framework | **Pure Python agentic loop** | No LangChain — full control over reasoning steps |
-| CLI | **Rich** (Python) | Beautiful terminal output and interactive prompts |
+| LLM (fallback) | **Ollama** — local Llama 3.1 | Offline fallback if Groq unavailable |
+| Agent framework | **Pure Python agentic loop** | Full control over observe→reason→ask→conclude |
+| CLI | **Rich** (Python) | Terminal output and interactive prompts |
+| Containers | **Docker** | Runs Prometheus + Grafana |
 
 ---
 
@@ -137,51 +164,43 @@ This lets the agent reason: *"Payment service is degrading AND a BOGO offer star
 
 ```
 sre_agent/
+  docker-compose.yml          # Prometheus + Grafana containers
+
   db/
-    schema.sql              # All 9 Supabase tables + indexes + views
-    rpc_functions.sql       # Postgres functions for time-window queries
-    database.py             # All DB read/write operations (single source of truth)
-    seed.py                 # 7 days of realistic mock data
+    schema.sql                # All 9 Supabase tables
+    rpc_functions.sql         # Postgres time-window query functions
+    database.py               # All DB operations
+    seed.py                   # 7 days of realistic mock data
 
   collector/
-    collector.py            # APScheduler — polls services, triggers agent
-    anomaly_detector.py     # Z-score + trend detection → LLM signal formatter
+    collector.py              # APScheduler — polls services, triggers agent
+    anomaly_detector.py       # Z-score + trend → LLM signal formatter
 
   services/
-    base_service.py         # Base class for all mock services
-    definitions.py          # 6 service instances with realistic baselines
-    service_runner.py       # Starts all 6 services simultaneously
-    simulate_incident.py    # CLI tool to trigger demo incident scenarios
+    base_service.py           # Base class with Prometheus metrics + background simulator
+    definitions.py            # 6 service instances with realistic baselines
+    service_runner.py         # Starts all 6 services simultaneously
+    simulate_incident.py      # CLI tool to trigger demo incident scenarios
 
   agent/
-    llm_adapter.py          # Groq/Ollama swap layer — one flag in .env
-    prompts.py              # System prompts for all 6 reasoning modes
-    context_builder.py      # Assembles full context package for LLM
-    agent_loop.py           # Core loop: observe → reason → ask → conclude
+    llm_adapter.py            # Groq/Ollama swap — one flag in .env
+    prompts.py                # System prompts for all 6 reasoning modes
+    context_builder.py        # Assembles full context (Prometheus + Supabase + operator)
+    prometheus_adapter.py     # Queries Prometheus HTTP API with PromQL
+    agent_loop.py             # Core loop: observe → reason → ask → conclude
 
   config/
-    dependency_map.py       # Service dependency graph for blast radius
+    dependency_map.py         # Service dependency graph for blast radius
+    prometheus.yml            # Prometheus scrape config (all 6 services)
+    grafana/
+      provisioning/
+        datasources/          # Auto-connects Grafana to Prometheus
+        dashboards/           # Pre-built SRE Agent dashboard
 
-  main.py                   # CLI entry point — all user interaction
-  .env.example              # Environment variable template
+  main.py                     # CLI entry point
+  .env.example                # Environment variable template
   requirements.txt
 ```
-
----
-
-## Database Schema
-
-| Table | Purpose |
-|---|---|
-| `metrics_raw` | One row per service per poll — the time-series core |
-| `baseline_profiles` | Rolling mean + std dev per service per time window |
-| `anomaly_events` | Detected anomalies with full z-score breakdown |
-| `llm_signals` | Plain-English signals ready for LLM consumption |
-| `context_packages` | Full bundles sent to agent — full audit trail |
-| `agent_outputs` | Every LLM response stored — queryable history |
-| `context_store` | Free-text operator context (the agent's memory) |
-| `alerts` | Individual alerts before noise reduction |
-| `incidents` | Grouped alerts after noise reduction |
 
 ---
 
@@ -189,6 +208,7 @@ sre_agent/
 
 ### Prerequisites
 - Python 3.10+
+- Docker Desktop
 - A free [Supabase](https://supabase.com) account
 - A free [Groq](https://console.groq.com) API key
 
@@ -196,8 +216,8 @@ sre_agent/
 
 **1. Clone the repo**
 ```bash
-git clone https://github.com/your-username/sre-agent.git
-cd sre-agent
+git clone https://github.com/Sharvin-1816/SRE-Agent.git
+cd SRE-Agent
 ```
 
 **2. Install dependencies**
@@ -221,7 +241,12 @@ cp .env.example .env
 python db/seed.py
 ```
 
-**6. Run**
+**6. Start Prometheus + Grafana**
+```bash
+docker-compose up -d
+```
+
+**7. Run everything**
 
 Open 3 terminals:
 ```bash
@@ -235,6 +260,11 @@ python -m collector.collector
 python main.py
 ```
 
+**8. Open Grafana**
+- Go to `http://localhost:3000`
+- Login: `admin` / `sreagent`
+- Dashboards → SRE Agent → Service Overview
+
 ---
 
 ## CLI Commands
@@ -243,7 +273,7 @@ python main.py
 |---|---|
 | `context` | Add free-text operator context (events, outages, deployments) |
 | `contexts` | View and manage all saved context entries |
-| `status` | Live health table of all 6 services |
+| `status` | Live health table + confirms if Prometheus is active |
 | `query` | Ask a natural language question about system health |
 | `predict` | Run load and capacity prediction |
 | `blast` | Estimate blast radius if a service fails |
@@ -258,8 +288,6 @@ python main.py
 agent> simulate
 ```
 
-Choose from 4 scenarios:
-
 | Scenario | Tests |
 |---|---|
 | Payment gradual degradation | Predictive degradation + RCA |
@@ -267,41 +295,63 @@ Choose from 4 scenarios:
 | Black Friday 5x surge | Load prediction |
 | Gateway full outage | Alert noise reduction |
 
-After triggering a scenario, wait up to 60 seconds for the collector to detect it and auto-trigger the full agent analysis.
+After triggering, watch **Grafana** for the spike and **Terminal 2** for the agent's analysis.
 
 ---
 
 ## Extending to Real APIs
 
-The mock services are a test harness. To point this at real APIs, change one section in `collector/collector.py`:
+Change one section in `collector/collector.py`:
 
 ```python
 SERVICES = {
     "your_payment_api":  "https://api.yourcompany.com/payment",
     "your_auth_api":     "https://api.yourcompany.com/auth",
-    # ... add any service that exposes a /metrics or /health endpoint
 }
 ```
 
-Everything else — anomaly detection, baselines, agent reasoning — works identically on real data.
+And update `config/prometheus.yml` targets to point to your real service `/metrics` endpoints. Everything else — anomaly detection, baselines, agent reasoning — works identically.
+
+---
+
+## Changelog
+
+### v2.0
+- Added Prometheus integration — scrapes all 6 services every 15s
+- Agent now uses p50/p95/p99 latency instead of averages
+- Added Grafana dashboards (request rate, latency percentiles, CPU, memory, errors)
+- Added `prometheus_adapter.py` — PromQL query layer with Supabase fallback
+- Services now expose `/metrics` (Prometheus format) and `/metrics/json` (legacy)
+- Background simulator thread per service for accurate histogram data
+- Fixed UUID truncation bug in alert grouping
+- Fixed rate limiting — 4s delay between LLM calls
+- Agent now triggers on worst anomaly only (not all 6 simultaneously)
+- Health query now includes live CPU/memory data — agent no longer asks user for it
+
+### v1.0
+- Initial release
+- 6 mock FastAPI microservices with configurable failure modes
+- APScheduler-based metrics collector
+- Z-score + trend anomaly detection
+- Agentic loop: observe → reason → ask user → conclude
+- 6 reasoning modes: RCA, prediction, load, alerts, health query, blast radius
+- Operator context system (free-text, plain English)
+- Supabase (PostgreSQL) for all persistence
+- Groq API (LLM) with Ollama fallback
+- Alert noise reduction (N alerts → M incidents)
+- Simulate incident CLI (4 scenarios)
 
 ---
 
 ## Roadmap
 
-- [ ] Frontend dashboard (React + Recharts)
-- [ ] Webhook support for real alert ingestion (PagerDuty, Grafana)
-- [ ] Support for real API metrics formats (Prometheus, OpenTelemetry)
+- [ ] Webhook support (PagerDuty, Grafana alerts → agent)
+- [ ] Support real Prometheus metric formats (existing services)
 - [ ] Scheduled proactive analysis (not just on anomaly)
 - [ ] Multi-LLM comparison mode
 - [ ] Slack/Teams notification integration
+- [ ] OpenTelemetry support
 
 ---
 
-## Contributing
-
-This project is actively evolving. If you find a bug or want to add a feature, open an issue or PR.
-
----
-
-<p align="center">Built with Python · Groq · Supabase · FastAPI · Rich</p>
+<p align="center">Built with Python · Groq · Supabase · Prometheus · Grafana · FastAPI · Rich</p>

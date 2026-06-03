@@ -59,7 +59,7 @@ def poll_service(service_name: str, base_url: str) -> dict:
     """
     start = time.monotonic()
     try:
-        resp = httpx.get(f"{base_url}/metrics", timeout=5.0)
+        resp = httpx.get(f"{base_url}/metrics/json", timeout=5.0)
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
 
         if resp.status_code == 200:

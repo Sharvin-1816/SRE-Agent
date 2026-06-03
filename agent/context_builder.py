@@ -11,6 +11,7 @@ The context package has two forms:
 
 import json
 from datetime import datetime, timezone, timedelta
+from rich.console import Console
 from db.database import (
     get_recent_metrics, get_latest_metric_per_service,
     get_context_as_text, get_ungrouped_alerts,
@@ -18,6 +19,42 @@ from db.database import (
     get_outputs_for_health_query
 )
 from config.dependency_map import get_dependency_summary, SERVICE_DESCRIPTIONS
+
+console = Console()
+
+# Try to use Prometheus for richer metrics; fall back to Supabase if unavailable
+try:
+    from agent.prometheus_adapter import (
+        is_available as prometheus_available,
+        format_current_metrics_table,
+        format_recent_metrics_table,
+    )
+    _USE_PROMETHEUS = True
+except ImportError:
+    _USE_PROMETHEUS = False
+
+
+def _get_metrics_source() -> str:
+    """Returns which metrics source is active."""
+    if _USE_PROMETHEUS and prometheus_available():
+        return "prometheus"
+    return "supabase"
+
+
+def _metrics_source_label() -> str:
+    """Returns a label shown in agent prompts indicating data source."""
+    source = _get_metrics_source()
+    if source == "prometheus":
+        return "📡 Live data via Prometheus (p50/p95/p99 latency)"
+    return "🗄️ Historical data via Supabase (average latency)"
+
+
+def _metrics_source_label() -> str:
+    """Returns a label string showing which source is active — shown in agent prompts."""
+    source = _get_metrics_source()
+    if source == "prometheus":
+        return "📡 METRICS SOURCE: Prometheus (p50/p95/p99 latency histograms)"
+    return "🗄️  METRICS SOURCE: Supabase fallback (average latency only)"
 
 
 # ── Datetime context ──────────────────────────────────────────────────────────
@@ -46,13 +83,20 @@ def _build_datetime_context() -> dict:
 
 def _format_recent_metrics(service_name: str) -> str:
     """Last 30 min of metrics for a service as a readable table."""
+    source = _get_metrics_source()
+
+    if source == "prometheus":
+        console.print(f"  [dim cyan]📡 Using Prometheus for {service_name} metrics[/dim cyan]")
+        return format_recent_metrics_table(service_name, minutes=30)
+
+    # Supabase fallback
+    console.print(f"  [dim yellow]🗄 Using Supabase fallback for {service_name} metrics[/dim yellow]")
     rows = get_recent_metrics(service_name, minutes=30)
     if not rows:
         return "No recent metrics available."
-
     lines = ["Time (UTC) | RT (ms) | Error % | Throughput | CPU % | Mem %"]
     lines.append("-" * 65)
-    for r in rows[-10:]:    # last 10 readings
+    for r in rows[-10:]:
         t   = r["timestamp"][11:16]
         rt  = f"{r.get('response_time_ms', '?'):.0f}"
         er  = f"{r.get('error_rate_pct',   '?'):.1f}"
@@ -60,16 +104,22 @@ def _format_recent_metrics(service_name: str) -> str:
         cpu = f"{r.get('cpu_pct',          '?'):.1f}"
         mem = f"{r.get('memory_pct',       '?'):.1f}"
         lines.append(f"{t}      | {rt:>7} | {er:>7} | {tp:>10} | {cpu:>5} | {mem:>5}")
-
     return "\n".join(lines)
 
 
 def _format_all_latest() -> str:
-    """One-line status for every service — used for blast radius and NL queries."""
+    """Current status for every service."""
+    source = _get_metrics_source()
+
+    if source == "prometheus":
+        console.print(f"  [dim cyan]📡 Using Prometheus for live metrics[/dim cyan]")
+        return format_current_metrics_table()
+
+    # Supabase fallback
+    console.print(f"  [dim yellow]🗄 Using Supabase fallback for live metrics[/dim yellow]")
     rows = get_latest_metric_per_service()
     if not rows:
         return "No metrics available."
-
     lines = ["Service               | Status | RT (ms) | Error % | Throughput"]
     lines.append("-" * 70)
     for r in rows:
@@ -79,7 +129,6 @@ def _format_all_latest() -> str:
         er     = f"{r.get('error_rate_pct',   0):.1f}"
         tp     = f"{r.get('throughput_rps',   0):.0f}"
         lines.append(f"{svc} | {status} | {rt:>7} | {er:>7} | {tp:>10}")
-
     return "\n".join(lines)
 
 
@@ -156,6 +205,7 @@ def build_for_rca(service_name: str, signal: dict) -> tuple[dict, str]:
 
     prompt = f"""
 ANOMALY SIGNAL FOR {service_name.upper().replace('_', ' ')}
+METRICS SOURCE: {_metrics_source_label()}
 ═══════════════════════════════════════════════════════════════
 {signal.get('human_summary', 'No summary available.')}
 
@@ -375,6 +425,7 @@ def build_for_health_query(question: str) -> tuple[dict, str]:
 HEALTH QUERY REQUEST
 ═══════════════════════════════════════════════════════════════
 USER QUESTION: "{question}"
+METRICS SOURCE: {_metrics_source_label()}
 
 QUERIED TIME RANGE: {since[:16]} to {until[:16]} UTC
 
