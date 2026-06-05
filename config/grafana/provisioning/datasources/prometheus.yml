@@ -1,32 +1,9 @@
-global:
-  scrape_interval: 15s        # scrape every 15 seconds
-  evaluation_interval: 15s
+apiVersion: 1
 
-scrape_configs:
-
-  # Scrape Prometheus itself
-  - job_name: "prometheus"
-    static_configs:
-      - targets: ["localhost:9090"]
-
-  # Scrape all 6 mock microservices
-  # host.docker.internal lets Prometheus (in Docker) reach
-  # services running on your local machine
-  - job_name: "sre_services"
-    static_configs:
-      - targets:
-          - "host.docker.internal:3001"
-          - "host.docker.internal:3002"
-          - "host.docker.internal:3003"
-          - "host.docker.internal:3004"
-          - "host.docker.internal:3005"
-          - "host.docker.internal:3006"
-    relabel_configs:
-      # Extract service name from port for cleaner labels
-      - source_labels: [__address__]
-        regex: ".*:(\\d+)"
-        target_label: port
-      - source_labels: [__address__]
-        regex: "host.docker.internal:(\\d+)"
-        replacement: "${1}"
-        target_label: instance
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

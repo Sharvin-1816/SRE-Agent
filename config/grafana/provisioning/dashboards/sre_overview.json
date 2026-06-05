@@ -10,9 +10,7 @@
       "title": "Request Rate (req/s)",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "reqps" }
-      },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
       "targets": [{
         "expr": "rate(sre_requests_total[1m])",
         "legendFormat": "{{service_name}}"
@@ -23,9 +21,7 @@
       "title": "p95 Response Time (ms)",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "ms" }
-      },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
       "targets": [{
         "expr": "histogram_quantile(0.95, rate(sre_request_duration_ms_bucket[2m]))",
         "legendFormat": "{{service_name}}"
@@ -36,9 +32,7 @@
       "title": "Error Rate (%)",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "percent" }
-      },
+      "fieldConfig": { "defaults": { "unit": "percent" } },
       "targets": [{
         "expr": "sre_error_rate_percent",
         "legendFormat": "{{service_name}}"
@@ -49,9 +43,7 @@
       "title": "CPU Usage (%)",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "percent" }
-      },
+      "fieldConfig": { "defaults": { "unit": "percent" } },
       "targets": [{
         "expr": "sre_cpu_percent",
         "legendFormat": "{{service_name}}"
@@ -62,9 +54,7 @@
       "title": "Memory Usage (%)",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "percent" }
-      },
+      "fieldConfig": { "defaults": { "unit": "percent" } },
       "targets": [{
         "expr": "sre_memory_percent",
         "legendFormat": "{{service_name}}"
@@ -75,9 +65,7 @@
       "title": "Throughput (req/s)",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "reqps" }
-      },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
       "targets": [{
         "expr": "sre_throughput_rps",
         "legendFormat": "{{service_name}}"
@@ -88,9 +76,7 @@
       "title": "p50 / p95 / p99 Latency — Payment Service",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
-      "fieldConfig": {
-        "defaults": { "unit": "ms" }
-      },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
       "targets": [
         {
           "expr": "histogram_quantile(0.50, rate(sre_request_duration_ms_bucket{service_name='payment_service'}[2m]))",
@@ -108,12 +94,10 @@
     },
     {
       "id": 8,
-      "title": "Degrading Services",
+      "title": "Degrading Services (1 = degrading)",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 32, "w": 24, "h": 6 },
-      "fieldConfig": {
-        "defaults": { "unit": "short", "min": 0, "max": 1 }
-      },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 } },
       "targets": [{
         "expr": "sre_is_degrading",
         "legendFormat": "{{service_name}}"

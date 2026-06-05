@@ -36,6 +36,10 @@ from agent.context_builder import (
     build_for_rca, build_for_prediction, build_for_load_prediction,
     build_for_alert_grouping, build_for_health_query, build_for_blast_radius
 )
+from agent.memory import (
+    build_memory_context, display_used_memories,
+    extract_and_store_pattern,
+)
 from db.database import (
     insert_agent_output, get_ungrouped_alerts,
     mark_alerts_grouped, insert_incident, add_user_context
@@ -43,6 +47,13 @@ from db.database import (
 
 console = Console()
 CONFIDENCE_THRESHOLD = int(os.getenv("AGENT_CONFIDENCE_THRESHOLD", "75"))
+
+
+def _get_time_of_day(hour: int) -> str:
+    if   0  <= hour < 6:  return "overnight"
+    elif 6  <= hour < 12: return "morning"
+    elif 12 <= hour < 18: return "afternoon"
+    else:                 return "evening"
 
 
 # ── Output display ────────────────────────────────────────────────────────────
@@ -210,8 +221,18 @@ def _handle_context_gap(result: dict, system_prompt: str, user_prompt: str) -> d
 # ── Mode runners ──────────────────────────────────────────────────────────────
 
 def run_rca(service_name: str, signal: dict) -> dict:
-    console.print(f"\n[bold]🔍 Running RCA for {service_name}...[/bold]")
+    console.print(f"\n[bold]Running RCA for {service_name}...[/bold]")
+
+    # Build memory context
+    now         = datetime.now(timezone.utc)
+    time_of_day = _get_time_of_day(now.hour)
+    day_of_week = now.strftime("%A")
+    memory_text, used_memories = build_memory_context(service_name, time_of_day)
+
     pkg, prompt = build_for_rca(service_name, signal)
+
+    # Inject memory into prompt
+    prompt = prompt + memory_text
 
     raw    = ask_llm(RCA_SYSTEM, prompt)
     result = parse_json_response(raw)
@@ -221,7 +242,10 @@ def run_rca(service_name: str, signal: dict) -> dict:
 
     _display_rca(result, service_name)
 
-    insert_agent_output({
+    # Display which memories were used
+    display_used_memories(used_memories, service_name)
+
+    saved = insert_agent_output({
         "context_package_id":  pkg["id"],
         "mode":                "rca",
         "service_name":        service_name,
@@ -231,12 +255,24 @@ def run_rca(service_name: str, signal: dict) -> dict:
         "fix_suggestions":     result.get("fix_suggestions", []),
         "raw_llm_response":    raw,
     })
+
+    # Extract and store pattern for future memory
+    result["mode"] = "rca"
+    extract_and_store_pattern(result, service_name, time_of_day, day_of_week)
+
     return result
 
 
 def run_prediction(service_name: str, signal: dict) -> dict:
-    console.print(f"\n[bold]📈 Running degradation prediction for {service_name}...[/bold]")
+    console.print(f"\n[bold]Running degradation prediction for {service_name}...[/bold]")
+
+    now         = datetime.now(timezone.utc)
+    time_of_day = _get_time_of_day(now.hour)
+    day_of_week = now.strftime("%A")
+    memory_text, used_memories = build_memory_context(service_name, time_of_day)
+
     pkg, prompt = build_for_prediction(service_name, signal)
+    prompt = prompt + memory_text
 
     raw    = ask_llm(PREDICT_SYSTEM, prompt)
     result = parse_json_response(raw)
@@ -245,6 +281,7 @@ def run_prediction(service_name: str, signal: dict) -> dict:
         result = _handle_context_gap(result, PREDICT_SYSTEM, prompt)
 
     _display_prediction(result, service_name)
+    display_used_memories(used_memories, service_name)
 
     insert_agent_output({
         "context_package_id":  pkg["id"],
@@ -256,6 +293,10 @@ def run_prediction(service_name: str, signal: dict) -> dict:
         "fix_suggestions":     result.get("recommendations", []),
         "raw_llm_response":    raw,
     })
+
+    result["mode"] = "predict_degradation"
+    extract_and_store_pattern(result, service_name, time_of_day, day_of_week)
+
     return result
 
 

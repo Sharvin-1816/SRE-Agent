@@ -155,10 +155,60 @@ def cmd_alert_noise():
     run_alert_grouping()
 
 
-def cmd_simulate():
-    """Launch the incident simulator."""
-    console.print("[dim]Launching incident simulator...[/dim]")
-    os.system("python -m services.simulate_incident")
+def cmd_view_memory():
+    """View all stored long term memory patterns."""
+    from rich.table import Table
+    SERVICES = [
+        "payment_service", "cart_service", "notification_service",
+        "auth_service", "inventory_service", "gateway_service"
+    ]
+
+    try:
+        from db.database import db
+        result = (
+            db().table("agent_memory_patterns")
+            .select("*")
+            .order("occurrence_count", desc=True)
+            .execute()
+        )
+        patterns = result.data
+    except Exception as e:
+        console.print(f"[red]  Error fetching memory: {e}[/red]")
+        return
+
+    if not patterns:
+        console.print("[yellow]  No memory patterns stored yet. Run some agent analyses first.[/yellow]")
+        return
+
+    table = Table(title="Long Term Memory Patterns", show_lines=True)
+    table.add_column("Service",     style="cyan", width=22)
+    table.add_column("Pattern",     width=24)
+    table.add_column("Seen",        width=6,  justify="right")
+    table.add_column("Root cause",  width=30)
+    table.add_column("Resolution",  width=30)
+    table.add_column("Outcome",     width=12)
+    table.add_column("Last seen",   width=12)
+
+    for p in patterns:
+        correct = p.get("prediction_was_correct")
+        if correct is True:
+            outcome_str = "correct"
+        elif correct is False:
+            outcome_str = "incorrect"
+        else:
+            outcome_str = p.get("outcome", "unknown")
+
+        table.add_row(
+            p.get("service_name", ""),
+            p.get("pattern_type", ""),
+            str(p.get("occurrence_count", 1)),
+            (p.get("root_cause") or "")[:30],
+            (p.get("resolution") or "")[:30],
+            outcome_str,
+            p.get("last_seen", "")[:10],
+        )
+
+    console.print(table)
 
 
 def cmd_status():
@@ -209,6 +259,12 @@ def cmd_status():
     console.print(table)
 
 
+def cmd_simulate():
+    """Launch the incident simulator."""
+    console.print("[dim]Launching incident simulator...[/dim]")
+    os.system("python -m services.simulate_incident")
+
+
 def cmd_help():
     console.print(Panel(
         "[bold cyan]context[/bold cyan]   — Add free-text operator context (events, deployments, outages)\n"
@@ -219,6 +275,7 @@ def cmd_help():
         "[bold cyan]blast[/bold cyan]     — Estimate blast radius if a service fails\n"
         "[bold cyan]alerts[/bold cyan]    — Run alert noise reduction on current alerts\n"
         "[bold cyan]simulate[/bold cyan]  — Trigger an incident scenario for demo\n"
+        "[bold cyan]memory[/bold cyan]    — View all stored long term memory patterns\n"
         "[bold cyan]help[/bold cyan]      — Show this menu\n"
         "[bold cyan]exit[/bold cyan]      — Quit",
         title="[bold]Available Commands[/bold]",
@@ -237,6 +294,7 @@ COMMANDS = {
     "blast":     cmd_blast_radius,
     "alerts":    cmd_alert_noise,
     "simulate":  cmd_simulate,
+    "memory":    cmd_view_memory,
     "help":      cmd_help,
 }
 
@@ -247,6 +305,7 @@ def main():
         "Agent ready. Type [bold cyan]help[/bold cyan] for commands.\n"
         "[dim]Tip: Start by running 'python -m services.service_runner' and "
         "'python -m collector.collector' in separate terminals.[/dim]\n"
+        "[dim]Decisions API: run 'python -m api.decisions_api' in a separate terminal.[/dim]\n"
     )
 
     while True:

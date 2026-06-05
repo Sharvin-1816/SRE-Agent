@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.0-blue?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v2.1-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/LLM-Groq%20%2F%20Ollama-orange?style=flat-square"/>
   <img src="https://img.shields.io/badge/DB-Supabase-green?style=flat-square"/>
   <img src="https://img.shields.io/badge/Metrics-Prometheus-red?style=flat-square"/>
@@ -279,6 +279,7 @@ python main.py
 | `blast` | Estimate blast radius if a service fails |
 | `alerts` | Run alert noise reduction on current alerts |
 | `simulate` | Trigger an incident scenario for demo |
+| `memory` | View all stored long term memory patterns |
 
 ---
 
@@ -316,6 +317,17 @@ And update `config/prometheus.yml` targets to point to your real service `/metri
 
 ## Changelog
 
+### v2.1
+- Added two-tier memory system (short term + long term patterns)
+- Short term: last 48h of agent decisions injected into every RCA and prediction prompt
+- Long term: structured patterns extracted after each run, stored in Supabase, matched by service and time of day
+- Agent displays which past memories it drew from after every analysis — full reasoning transparency, no hidden context
+- New `memory` CLI command shows all stored long term patterns across all services
+- Pattern extraction uses a lightweight secondary LLM call to build structured records
+- Outcome tracking — memory records whether past predictions were correct over time
+- New Supabase table: `agent_memory_patterns`
+- Fixed Pydantic v2 compatibility warning in decisions API
+
 ### v2.0
 - Added Prometheus integration — scrapes all 6 services every 15s
 - Agent now uses p50/p95/p99 latency instead of averages
@@ -345,12 +357,12 @@ And update `config/prometheus.yml` targets to point to your real service `/metri
 
 ## Roadmap
 
-- [ ] Webhook support (PagerDuty, Grafana alerts → agent)
-- [ ] Support real Prometheus metric formats (existing services)
+- [ ] Webhook support (Grafana, PagerDuty, Datadog alerts → agent)
+- [ ] Agent decision panel in Grafana
 - [ ] Scheduled proactive analysis (not just on anomaly)
-- [ ] Multi-LLM comparison mode
-- [ ] Slack/Teams notification integration
 - [ ] OpenTelemetry support
+- [ ] Memory outcome tracking automation (collector updates prediction accuracy)
+- [ ] Slack/Teams notification integration
 
 ---
 
