@@ -62,89 +62,7 @@ See [Releases](../../releases) to download any version.
 
 ## Architecture
 
-## Architecture
-
 ```mermaid
-flowchart TB
-
-    subgraph Services["Microservices Layer"]
-        P["Payment"]
-        C["Cart"]
-        A["Auth"]
-        I["Inventory"]
-        N["Notification"]
-        G["Gateway"]
-    end
-
-    subgraph Observability["Observability"]
-        PROM["Prometheus"]
-        GRAF["Grafana"]
-        COL["Metrics Collector"]
-    end
-
-    subgraph Intelligence["AI Analysis Engine"]
-        ANOM["Anomaly Detection<br/>Z-Score + Trend Analysis"]
-        CTX["Context Builder<br/>Metrics + History + Events"]
-        MEM["Memory System<br/>Short-Term + Long-Term"]
-        AGENT["Agentic Reasoning Loop"]
-        LLM["LLM<br/>Groq / Ollama"]
-    end
-
-    subgraph Storage["Persistence Layer"]
-        DB["Supabase<br/>PostgreSQL + pgvector"]
-    end
-
-    subgraph Output["Decision Engine"]
-        RCA["Root Cause Analysis"]
-        PRED["Failure Prediction"]
-        LOAD["Load Forecasting"]
-        ALERT["Alert Reduction"]
-        HEALTH["Health Queries"]
-        BLAST["Blast Radius Analysis"]
-    end
-
-    P --> PROM
-    C --> PROM
-    A --> PROM
-    I --> PROM
-    N --> PROM
-    G --> PROM
-
-    P --> COL
-    C --> COL
-    A --> COL
-    I --> COL
-    N --> COL
-    G --> COL
-
-    PROM --> GRAF
-
-    COL --> ANOM
-    ANOM --> CTX
-
-    DB --> CTX
-    DB --> MEM
-
-    CTX --> AGENT
-    MEM --> AGENT
-
-    AGENT --> LLM
-    LLM --> RCA
-    LLM --> PRED
-    LLM --> LOAD
-    LLM --> ALERT
-    LLM --> HEALTH
-    LLM --> BLAST
-
-    RCA --> DB
-    PRED --> DB
-    LOAD --> DB
-    ALERT --> DB
-    HEALTH --> DB
-    BLAST --> DB
-```
-
-<!-- ```mermaid
 flowchart TD
     subgraph SVC["Mock Microservices — FastAPI"]
         P["payment :3001"]
@@ -214,30 +132,6 @@ flowchart TD
     OUT -->|"extract + store pattern"| LTM
     DB --> STM
     DB --> LTM
-``` -->
-
-### Agent Reasoning Workflow
-
-```mermaid
-flowchart LR
-
-    OBS["Observe"]
-    REASON["Reason"]
-    MEMORY["Retrieve Memory"]
-    CONTEXT["Build Context"]
-    CONF["Confidence Check"]
-    ASK["Ask User"]
-    CONCLUDE["Conclude"]
-
-    OBS --> REASON
-    REASON --> MEMORY
-    MEMORY --> CONTEXT
-    CONTEXT --> CONF
-
-    CONF -->|< 75%| ASK
-    CONF -->|>= 75%| CONCLUDE
-
-    ASK --> CONCLUDE
 ```
 
 ### Why Z-score instead of thresholds?
