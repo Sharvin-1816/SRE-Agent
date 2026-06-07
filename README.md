@@ -60,56 +60,184 @@ See [Releases](../../releases) to download any version.
 
 ---
 
-## How the Agent Works
+## Architecture
 
+## Architecture
+
+```mermaid
+flowchart TB
+
+    subgraph Services["Microservices Layer"]
+        P["Payment"]
+        C["Cart"]
+        A["Auth"]
+        I["Inventory"]
+        N["Notification"]
+        G["Gateway"]
+    end
+
+    subgraph Observability["Observability"]
+        PROM["Prometheus"]
+        GRAF["Grafana"]
+        COL["Metrics Collector"]
+    end
+
+    subgraph Intelligence["AI Analysis Engine"]
+        ANOM["Anomaly Detection<br/>Z-Score + Trend Analysis"]
+        CTX["Context Builder<br/>Metrics + History + Events"]
+        MEM["Memory System<br/>Short-Term + Long-Term"]
+        AGENT["Agentic Reasoning Loop"]
+        LLM["LLM<br/>Groq / Ollama"]
+    end
+
+    subgraph Storage["Persistence Layer"]
+        DB["Supabase<br/>PostgreSQL + pgvector"]
+    end
+
+    subgraph Output["Decision Engine"]
+        RCA["Root Cause Analysis"]
+        PRED["Failure Prediction"]
+        LOAD["Load Forecasting"]
+        ALERT["Alert Reduction"]
+        HEALTH["Health Queries"]
+        BLAST["Blast Radius Analysis"]
+    end
+
+    P --> PROM
+    C --> PROM
+    A --> PROM
+    I --> PROM
+    N --> PROM
+    G --> PROM
+
+    P --> COL
+    C --> COL
+    A --> COL
+    I --> COL
+    N --> COL
+    G --> COL
+
+    PROM --> GRAF
+
+    COL --> ANOM
+    ANOM --> CTX
+
+    DB --> CTX
+    DB --> MEM
+
+    CTX --> AGENT
+    MEM --> AGENT
+
+    AGENT --> LLM
+    LLM --> RCA
+    LLM --> PRED
+    LLM --> LOAD
+    LLM --> ALERT
+    LLM --> HEALTH
+    LLM --> BLAST
+
+    RCA --> DB
+    PRED --> DB
+    LOAD --> DB
+    ALERT --> DB
+    HEALTH --> DB
+    BLAST --> DB
 ```
-┌─────────────────────────────────────────────────────────┐
-│           MOCK MICROSERVICES (FastAPI)                  │
-│  Payment · Cart · Notification · Auth · Inventory · GW  │
-│  Each exposes /metrics (Prometheus) and /metrics/json   │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-          ┌────────────┴────────────┐
-          ▼                         ▼
-┌──────────────────┐     ┌──────────────────────┐
-│   PROMETHEUS     │     │  COLLECTOR            │
-│   scrapes /metrics     │  (APScheduler)        │
-│   every 15s      │     │  pings /metrics/json  │
-│   p50/p95/p99    │     │  every 60s → Supabase │
-└────────┬─────────┘     └──────────┬───────────┘
-         │                          │
-         ▼                          ▼
-┌──────────────────┐     ┌──────────────────────┐
-│   GRAFANA        │     │  ANOMALY DETECTOR     │
-│   Live dashboards│     │  Z-score + trend      │
-│   port 3000      │     │  → triggers agent     │
-└──────────────────┘     └──────────┬───────────┘
-                                    │
-                                    ▼
-                         ┌──────────────────────┐
-                         │  CONTEXT BUILDER     │
-                         │  Prometheus metrics  │
-                         │  + Supabase history  │
-                         │  + Operator context  │
-                         │  + Dependency map    │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-                         ┌──────────────────────┐
-                         │  AGENTIC LOOP        │
-                         │  1. Observe          │
-                         │  2. Reason (LLM)     │
-                         │  3. Gaps? → Ask user │
-                         │  4. Conclude         │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-                         ┌──────────────────────┐
-                         │  OUTPUT (6 MODULES)  │
-                         │  RCA · Prediction    │
-                         │  Load · Alerts       │
-                         │  Health · Blast      │
-                         └──────────────────────┘
+
+<!-- ```mermaid
+flowchart TD
+    subgraph SVC["Mock Microservices — FastAPI"]
+        P["payment :3001"]
+        C["cart :3002"]
+        N["notification :3003"]
+        A["auth :3004"]
+        I["inventory :3005"]
+        G["gateway :3006"]
+    end
+
+    subgraph OBS["Observability Layer"]
+        PROM["Prometheus\nscrape /metrics every 15s\np50 / p95 / p99 latency"]
+        GRAF["Grafana\nlive dashboards\nalert rules + contact point"]
+    end
+
+    subgraph COL["Collection + Detection"]
+        COLL["Collector — APScheduler\npoll /metrics/json every 60s\nwrites to Supabase"]
+        ANOM["Anomaly Detector\nZ-score per service per time window\ntrend detection · LLM signal formatter"]
+    end
+
+    subgraph HOOK["Webhook Receiver — FastAPI :5001"]
+        WH["POST /webhook/grafana\ndeduplication window\nsynthetic LLM signal builder"]
+    end
+
+    subgraph MEM["Memory System"]
+        STM["Short term\nlast 48h agent decisions"]
+        LTM["Long term patterns\npgvector · sentence-transformers\ncosine similarity deduplication"]
+    end
+
+    subgraph AGENT["Agentic Loop — Python"]
+        CB["Context Builder\nPrometheus metrics · Supabase history\noperator context · dependency map"]
+        LOOP["1 observe · 2 reason · 3 ask if confidence lt 75% · 4 conclude"]
+        LLM["LLM — Groq llama-3.3-70b-versatile\nfallback: Ollama local"]
+    end
+
+    subgraph OUT["Output — 6 Reasoning Modes"]
+        RCA["RCA\nroot cause + fixes"]
+        PRED["Prediction\ntime to failure"]
+        LOAD["Load\ntraffic forecast"]
+        ALRT["Alerts\nnoise reduction"]
+        HQ["Health query\nnatural language"]
+        BR["Blast radius\ncascade risk"]
+    end
+
+    subgraph DB["Supabase — PostgreSQL + pgvector"]
+        T1["metrics_raw"]
+        T2["agent_outputs"]
+        T3["context_store"]
+        T4["anomaly_events"]
+        T5["incidents"]
+        T6["agent_memory_patterns\npgvector 384-dim embeddings"]
+    end
+
+    SVC -->|"/metrics every 15s"| PROM
+    SVC -->|"/metrics/json every 60s"| COLL
+    PROM --> GRAF
+    PROM --> CB
+    GRAF -->|"alert fires"| WH
+    COLL --> ANOM
+    ANOM --> CB
+    WH --> LOOP
+    CB --> LOOP
+    MEM --> LOOP
+    LOOP --> LLM
+    LLM --> OUT
+    OUT --> DB
+    OUT -->|"extract + store pattern"| LTM
+    DB --> STM
+    DB --> LTM
+``` -->
+
+### Agent Reasoning Workflow
+
+```mermaid
+flowchart LR
+
+    OBS["Observe"]
+    REASON["Reason"]
+    MEMORY["Retrieve Memory"]
+    CONTEXT["Build Context"]
+    CONF["Confidence Check"]
+    ASK["Ask User"]
+    CONCLUDE["Conclude"]
+
+    OBS --> REASON
+    REASON --> MEMORY
+    MEMORY --> CONTEXT
+    CONTEXT --> CONF
+
+    CONF -->|< 75%| ASK
+    CONF -->|>= 75%| CONCLUDE
+
+    ASK --> CONCLUDE
 ```
 
 ### Why Z-score instead of thresholds?

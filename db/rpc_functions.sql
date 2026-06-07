@@ -46,7 +46,46 @@ AS $$
 $$;
 
 
--- get_service_health_summary
+-- find_similar_memory_pattern
+-- Uses pgvector cosine similarity to find semantically similar
+-- memory patterns. Core of the deduplication system.
+CREATE OR REPLACE FUNCTION find_similar_memory_pattern(
+    p_service    TEXT,
+    p_embedding  vector(384),
+    p_threshold  FLOAT DEFAULT 0.85,
+    p_limit      INT   DEFAULT 1
+)
+RETURNS TABLE (
+    id                  UUID,
+    service_name        TEXT,
+    pattern_type        TEXT,
+    root_cause          TEXT,
+    resolution          TEXT,
+    occurrence_count    INT,
+    last_seen           TIMESTAMPTZ,
+    outcome             TEXT,
+    prediction_was_correct BOOLEAN,
+    raw_summary         TEXT,
+    time_of_day         TEXT,
+    day_of_week         TEXT,
+    similarity          FLOAT
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        id, service_name, pattern_type,
+        root_cause, resolution, occurrence_count,
+        last_seen, outcome, prediction_was_correct,
+        raw_summary, time_of_day, day_of_week,
+        1 - (root_cause_embedding <=> p_embedding) AS similarity
+    FROM agent_memory_patterns
+    WHERE
+        service_name = p_service
+        AND root_cause_embedding IS NOT NULL
+        AND 1 - (root_cause_embedding <=> p_embedding) >= p_threshold
+    ORDER BY root_cause_embedding <=> p_embedding
+    LIMIT p_limit;
+$$;
 -- Used by the NL health query module.
 -- Returns per-service aggregate stats for a given time range.
 CREATE OR REPLACE FUNCTION get_service_health_summary(

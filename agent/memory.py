@@ -259,10 +259,18 @@ def extract_and_store_pattern(
 ):
     """
     After an agent RCA or prediction completes, extract a structured
-    pattern and store or update it in agent_memory_patterns.
-    Uses one lightweight LLM call.
+    pattern and store or update it using vector similarity deduplication.
+
+    Flow:
+      1. LLM extracts structured pattern from agent output
+      2. Embed the root_cause text → 384-dim vector
+      3. Search existing patterns by vector similarity (threshold 0.85)
+      4. If similar found → UPDATE (same incident, different wording)
+      5. If not found → INSERT new pattern
     """
     from agent.llm_adapter import ask_llm, parse_json_response
+    from agent.embeddings  import embed
+    from db.database       import upsert_memory_pattern_with_vector
 
     mode = agent_output.get("mode", "")
     if mode not in ("rca", "predict_degradation"):
@@ -275,7 +283,7 @@ def extract_and_store_pattern(
         "Return ONLY valid JSON with these exact keys — no other text:\n"
         "{\n"
         '  "pattern_type": "short_label_no_spaces",\n'
-        '  "root_cause": "one sentence",\n'
+        '  "root_cause": "one sentence — be specific about the technical cause",\n'
         '  "resolution": "one sentence — what fixed or would fix it",\n'
         '  "raw_summary": "2-3 sentences summarising the pattern"\n'
         "}"
@@ -298,32 +306,77 @@ def extract_and_store_pattern(
         console.print(f"[dim]  Memory extraction skipped: {e}[/dim]")
         return
 
+    root_cause = pattern.get("root_cause", "")
+    if not root_cause:
+        console.print("[dim]  Memory extraction skipped: no root cause extracted[/dim]")
+        return
+
+    # Generate embedding for the root cause text
+    try:
+        embedding = embed(root_cause)
+    except Exception as e:
+        console.print(f"[dim]  Embedding failed, falling back to exact match: {e}[/dim]")
+        # Fall back to simple upsert without vector search
+        _simple_upsert(pattern, service_name, time_of_day, day_of_week)
+        return
+
+    # Smart upsert with vector deduplication
+    record, was_new = upsert_memory_pattern_with_vector(
+        pattern={
+            "service_name":   service_name,
+            "pattern_type":   pattern.get("pattern_type", "unknown"),
+            "time_of_day":    time_of_day,
+            "day_of_week":    day_of_week,
+            "root_cause":     root_cause,
+            "resolution":     pattern.get("resolution"),
+            "outcome":        "unknown",
+            "raw_summary":    pattern.get("raw_summary"),
+        },
+        embedding=embedding,
+        threshold=0.85,
+    )
+
+    if was_new:
+        console.print(
+            f"[dim]  New memory pattern stored: "
+            f"{pattern.get('pattern_type')} for {service_name}[/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]  Existing memory updated (vector match): "
+            f"{record.get('pattern_type')} "
+            f"(seen {record.get('occurrence_count', '?')}x)[/dim]"
+        )
+
+
+def _simple_upsert(pattern: dict, service_name: str, time_of_day: str, day_of_week: str):
+    """Fallback upsert without vector search — exact pattern_type match only."""
+    from db.database import db
+    from datetime import datetime, timezone
+
+    now      = datetime.now(timezone.utc).isoformat()
     existing = (
-        _db().table("agent_memory_patterns")
+        db().table("agent_memory_patterns")
         .select("id, occurrence_count")
         .eq("service_name", service_name)
         .eq("pattern_type", pattern.get("pattern_type", "unknown"))
         .execute()
     ).data
 
-    now = datetime.now(timezone.utc).isoformat()
-
     if existing:
-        _db().table("agent_memory_patterns").update({
+        db().table("agent_memory_patterns").update({
             "occurrence_count": existing[0]["occurrence_count"] + 1,
             "last_seen":        now,
             "root_cause":       pattern.get("root_cause"),
             "resolution":       pattern.get("resolution"),
             "raw_summary":      pattern.get("raw_summary"),
-            "time_of_day":      time_of_day,
-            "day_of_week":      day_of_week,
         }).eq("id", existing[0]["id"]).execute()
         console.print(
-            f"[dim]  Memory updated: {pattern.get('pattern_type')} "
+            f"[dim]  Memory updated (exact match): {pattern.get('pattern_type')} "
             f"(seen {existing[0]['occurrence_count'] + 1}x)[/dim]"
         )
     else:
-        _db().table("agent_memory_patterns").insert({
+        db().table("agent_memory_patterns").insert({
             "service_name":     service_name,
             "pattern_type":     pattern.get("pattern_type", "unknown"),
             "time_of_day":      time_of_day,
@@ -337,7 +390,8 @@ def extract_and_store_pattern(
             "last_seen":        now,
         }).execute()
         console.print(
-            f"[dim]  New memory pattern stored: {pattern.get('pattern_type')}[/dim]"
+            f"[dim]  New memory pattern stored (exact): "
+            f"{pattern.get('pattern_type')}[/dim]"
         )
 
 

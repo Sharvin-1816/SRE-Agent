@@ -8,3 +8,4 @@ rich==13.7.1
 numpy==1.26.4
 python-dateutil==2.9.0
 prometheus-client==0.20.0
+sentence-transformers==3.0.1

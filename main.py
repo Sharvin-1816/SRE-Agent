@@ -213,15 +213,19 @@ def cmd_view_memory():
 
 def cmd_status():
     """Quick status of all services."""
-    # Show which data source is active
+    # Show which data source is active — suppress any adapter console output
     try:
         from agent.prometheus_adapter import is_available as prom_ok
-        if prom_ok():
-            console.print("  [cyan]📡 Data source: Prometheus (p95/p99 available)[/cyan]")
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            prom_running = prom_ok()
+        if prom_running:
+            console.print("  [cyan]Data source: Prometheus (p95/p99 available)[/cyan]")
         else:
-            console.print("  [yellow]🗄 Data source: Supabase (Prometheus unavailable)[/yellow]")
+            console.print("  [yellow]Data source: Supabase (Prometheus unavailable — run docker-compose up -d prometheus)[/yellow]")
     except Exception:
-        console.print("  [yellow]🗄 Data source: Supabase[/yellow]")
+        console.print("  [yellow]Data source: Supabase[/yellow]")
 
     rows = get_latest_metric_per_service()
     if not rows:
@@ -259,10 +263,48 @@ def cmd_status():
     console.print(table)
 
 
-def cmd_simulate():
-    """Launch the incident simulator."""
-    console.print("[dim]Launching incident simulator...[/dim]")
-    os.system("python -m services.simulate_incident")
+def cmd_webhooks():
+    """Show webhook receiver status and recent activity."""
+    try:
+        import httpx
+        port = int(os.getenv("WEBHOOK_PORT", "5001"))
+        resp = httpx.get(f"http://localhost:{port}/webhook/status", timeout=3.0)
+        data = resp.json()
+
+        console.print(Panel(
+            f"[bold]Webhook Receiver[/bold] — port {port}\n"
+            f"Grafana contact point URL: http://host.docker.internal:{port}/webhook/grafana\n"
+            f"Dedup window: {data.get('dedup_window_mins', 5)} minutes\n\n"
+            f"[bold]Active cooldowns:[/bold]\n" +
+            (
+                "\n".join(
+                    f"  {svc}: last triggered {ago}"
+                    for svc, ago in data.get("active_cooldowns", {}).items()
+                ) or "  None"
+            ) +
+            f"\n\n[bold]Recent webhooks:[/bold]\n" +
+            (
+                "\n".join(
+                    f"  [{w['received_at'][:16]}] {w['source'].upper()} — "
+                    f"{w['alerts']} alert(s) on {', '.join(w['services'])} — "
+                    f"{'triggered' if w['triggered'] else 'deduplicated'}"
+                    for w in data.get("recent_webhooks", [])[:5]
+                ) or "  No webhooks received yet"
+            ),
+            title="[bold cyan]Webhook Receiver Status[/bold cyan]",
+            border_style="cyan",
+        ))
+    except Exception:
+        console.print(
+            "[yellow]  Webhook receiver is not running.[/yellow]\n"
+            "[dim]  Start it: python -m api.webhook_receiver[/dim]\n\n"
+            "[dim]  Then in Grafana:[/dim]\n"
+            "[dim]    Alerting -> Contact points -> Add contact point[/dim]\n"
+            "[dim]    Type: Webhook[/dim]\n"
+            "[dim]    URL: http://host.docker.internal:5001/webhook/grafana[/dim]\n\n"
+            "[dim]  Test without real alert:[/dim]\n"
+            "[dim]    curl http://localhost:5001/webhook/test[/dim]"
+        )
 
 
 def cmd_help():
@@ -276,6 +318,7 @@ def cmd_help():
         "[bold cyan]alerts[/bold cyan]    — Run alert noise reduction on current alerts\n"
         "[bold cyan]simulate[/bold cyan]  — Trigger an incident scenario for demo\n"
         "[bold cyan]memory[/bold cyan]    — View all stored long term memory patterns\n"
+        "[bold cyan]webhooks[/bold cyan]  — Show webhook receiver status and recent activity\n"
         "[bold cyan]help[/bold cyan]      — Show this menu\n"
         "[bold cyan]exit[/bold cyan]      — Quit",
         title="[bold]Available Commands[/bold]",
@@ -284,6 +327,12 @@ def cmd_help():
 
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
+
+def cmd_simulate():
+    """Launch the incident simulator."""
+    console.print("[dim]Launching incident simulator...[/dim]")
+    os.system("python -m services.simulate_incident")
+
 
 COMMANDS = {
     "context":   cmd_add_context,
@@ -295,6 +344,7 @@ COMMANDS = {
     "alerts":    cmd_alert_noise,
     "simulate":  cmd_simulate,
     "memory":    cmd_view_memory,
+    "webhooks":  cmd_webhooks,
     "help":      cmd_help,
 }
 

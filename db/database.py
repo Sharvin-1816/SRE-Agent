@@ -17,7 +17,13 @@ load_dotenv()
 
 def get_client() -> Client:
     url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    # Support both service key and anon key
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+    if not key:
+        raise RuntimeError(
+            "No Supabase key found. Set either SUPABASE_SERVICE_KEY "
+            "or SUPABASE_ANON_KEY in your .env file."
+        )
     return create_client(url, key)
 
 _client: Optional[Client] = None
@@ -441,3 +447,146 @@ def resolve_incident(incident_id: str) -> None:
         "status": "resolved",
         "resolved_at": datetime.now(timezone.utc).isoformat()
     }).eq("id", incident_id).execute()
+
+
+# ── 10. agent_memory_patterns ─────────────────────────────────────────────────
+
+def get_memory_patterns(
+    service_name: str,
+    min_occurrences: int = 2
+) -> list[dict]:
+    result = (
+        db().table("agent_memory_patterns")
+        .select("*")
+        .eq("service_name", service_name)
+        .gte("occurrence_count", min_occurrences)
+        .order("occurrence_count", desc=True)
+        .execute()
+    )
+    return result.data
+
+
+def upsert_memory_pattern(pattern: dict) -> dict:
+    existing = (
+        db().table("agent_memory_patterns")
+        .select("id, occurrence_count")
+        .eq("service_name", pattern["service_name"])
+        .eq("pattern_type", pattern["pattern_type"])
+        .execute()
+        .data
+    )
+    if existing:
+        row = existing[0]
+        pattern["occurrence_count"] = row["occurrence_count"] + 1
+        pattern["last_seen"] = datetime.now(timezone.utc).isoformat()
+        db().table("agent_memory_patterns").update(pattern).eq("id", row["id"]).execute()
+        return {**row, **pattern}
+    else:
+        result = db().table("agent_memory_patterns").insert(pattern).execute()
+        return result.data[0]
+
+
+def find_similar_memory_pattern(
+    service_name: str,
+    embedding: list[float],
+    threshold: float = 0.85,
+) -> Optional[dict]:
+    """
+    Find an existing memory pattern that is semantically similar
+    to the given embedding using pgvector cosine similarity.
+
+    Returns the most similar pattern above the threshold,
+    or None if no similar pattern exists.
+
+    This is the core deduplication query — prevents storing
+    "DB connection pool exhaustion" and "database pool saturated"
+    as two separate records when they describe the same incident.
+    """
+    try:
+        # pgvector cosine similarity via Supabase RPC
+        result = db().rpc(
+            "find_similar_memory_pattern",
+            {
+                "p_service":    service_name,
+                "p_embedding":  embedding,
+                "p_threshold":  threshold,
+                "p_limit":      1,
+            }
+        ).execute()
+        return result.data[0] if result.data else None
+    except Exception:
+        # pgvector not enabled or RPC not found — fall back to exact match
+        return None
+
+
+def update_memory_pattern_embedding(pattern_id: str, embedding: list[float]) -> None:
+    """Store the embedding vector for a memory pattern."""
+    db().table("agent_memory_patterns").update({
+        "root_cause_embedding": embedding,
+    }).eq("id", pattern_id).execute()
+
+
+def upsert_memory_pattern_with_vector(
+    pattern: dict,
+    embedding: list[float],
+    threshold: float = 0.85,
+) -> tuple[dict, bool]:
+    """
+    Smart upsert that uses vector similarity to deduplicate.
+
+    1. Search for semantically similar existing patterns
+    2. If found (similarity > threshold) → UPDATE that record
+    3. If not found → INSERT new record
+
+    Returns (pattern_record, was_new) where was_new=True means
+    a new pattern was inserted, False means an existing one updated.
+    """
+    # First try vector similarity search
+    similar = find_similar_memory_pattern(service_name=pattern["service_name"], embedding=embedding, threshold=threshold)
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if similar:
+        # UPDATE the similar existing pattern
+        new_count = similar.get("occurrence_count", 1) + 1
+        update_data = {
+            "occurrence_count": new_count,
+            "last_seen":        now,
+            "root_cause":       pattern.get("root_cause"),
+            "resolution":       pattern.get("resolution"),
+            "raw_summary":      pattern.get("raw_summary"),
+            "time_of_day":      pattern.get("time_of_day"),
+            "day_of_week":      pattern.get("day_of_week"),
+            "root_cause_embedding": embedding,
+        }
+        db().table("agent_memory_patterns").update(
+            update_data
+        ).eq("id", similar["id"]).execute()
+        return {**similar, **update_data}, False
+
+    else:
+        # INSERT new pattern with embedding
+        pattern["root_cause_embedding"] = embedding
+        pattern["first_seen"] = now
+        pattern["last_seen"]  = now
+        pattern.setdefault("occurrence_count", 1)
+        result = db().table("agent_memory_patterns").insert(pattern).execute()
+        return result.data[0], True
+
+
+# ── 11. agent_memory_retrievals ───────────────────────────────────────────────
+
+def insert_memory_retrievals(rows: list[dict]) -> None:
+    if rows:
+        db().table("agent_memory_retrievals").insert(rows).execute()
+
+
+def get_memory_retrievals(agent_output_id: str) -> list[dict]:
+    result = (
+        db().table("agent_memory_retrievals")
+        .select("*")
+        .eq("agent_output_id", agent_output_id)
+        .order("retrieved_at", desc=False)
+        .execute()
+    )
+    return result.data
