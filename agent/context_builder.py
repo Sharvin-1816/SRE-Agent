@@ -19,6 +19,7 @@ from db.database import (
     get_outputs_for_health_query
 )
 from config.dependency_map import get_dependency_summary, SERVICE_DESCRIPTIONS
+from agent.memory import build_memory_context
 
 console = Console()
 
@@ -187,12 +188,15 @@ def _parse_time_range_from_query(question: str) -> tuple[str, str]:
 
 # ── Main builders ─────────────────────────────────────────────────────────────
 
-def build_for_rca(service_name: str, signal: dict) -> tuple[dict, str]:
+def build_for_rca(service_name: str, signal: dict) -> tuple[dict, str, list]:
     """Build context package and prompt text for RCA mode."""
     dt       = _build_datetime_context()
     ctx_text = get_context_as_text()
     metrics  = _format_recent_metrics(service_name)
     alerts   = _format_alerts(get_ungrouped_alerts(window_minutes=10))
+
+    # Build memory context
+    memory_block, retrievals = build_memory_context(service_name, dt["time_of_day"])
 
     package = {
         "trigger_reason": "anomaly_detected",
@@ -229,22 +233,28 @@ ACTIVE ALERTS:
 
 CURRENT TIME CONTEXT:
 {dt['day_of_week']}, {dt['date']} at {dt['time']} — {dt['time_of_day']}
+{memory_block}
 
 OPERATOR CONTEXT (provided by user — treat as ground truth):
 ─────────────────────────────────────────────────────────────
 {ctx_text}
 ─────────────────────────────────────────────────────────────
 
+Use the agent memory above to inform your analysis.
+If a past pattern matches, reference it explicitly in your root_cause.
 Perform root cause analysis. Return JSON only.
 """
-    return saved, prompt
+    return saved, prompt, retrievals
 
 
-def build_for_prediction(service_name: str, signal: dict) -> tuple[dict, str]:
+def build_for_prediction(service_name: str, signal: dict) -> tuple[dict, str, list]:
     """Build context package and prompt text for degradation prediction."""
     dt       = _build_datetime_context()
     ctx_text = get_context_as_text()
     metrics  = _format_recent_metrics(service_name)
+
+    # Build memory context
+    memory_block, retrievals = build_memory_context(service_name, dt["time_of_day"])
 
     package = {
         "trigger_reason": "anomaly_detected",
@@ -270,6 +280,7 @@ RECENT METRICS (last 30 min, showing trajectory):
 CURRENT TIME CONTEXT:
 {dt['day_of_week']}, {dt['date']} at {dt['time']} — {dt['time_of_day']}
 Days until weekend: {dt['days_to_weekend']}
+{memory_block}
 
 OPERATOR CONTEXT (provided by user — treat as ground truth):
 ─────────────────────────────────────────────────────────────
@@ -277,10 +288,12 @@ OPERATOR CONTEXT (provided by user — treat as ground truth):
 ─────────────────────────────────────────────────────────────
 NOTE: If any operator context mentions upcoming events (sales, launches,
 outages, deployments), factor those into your failure timeline prediction.
+If memory shows this pattern has occurred before, use that to calibrate
+your confidence and time-to-failure estimate.
 
 Predict degradation trajectory. Return JSON only.
 """
-    return saved, prompt
+    return saved, prompt, retrievals
 
 
 def build_for_load_prediction(service_name: str = None) -> tuple[dict, str]:

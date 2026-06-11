@@ -1,13 +1,13 @@
 """
 agent/prompts.py
 
-System prompts for all 6 agent reasoning modes.
-Each prompt is carefully engineered to:
-  1. Give the LLM a clear role and constraints
-  2. Tell it exactly what JSON structure to return
-  3. Instruct it to use operator context in its reasoning
-  4. Ask it to flag confidence and whether it needs more info
+System prompts for all 6 agent reasoning modes as LangChain ChatPromptTemplates.
+Each template has a system message (role + JSON schema) and a {context} variable
+for the user message built by context_builder.
 """
+
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
+from langchain_core.messages import SystemMessage
 
 # ── Shared preamble injected into every prompt ────────────────────────────────
 
@@ -180,3 +180,21 @@ Return this exact JSON:
   "fix_suggestions": [<string>, ...]
 }
 """
+
+# ── ChatPromptTemplate objects ────────────────────────────────────────────────
+# Each template pairs the system prompt with a {context} variable for the
+# user message assembled by context_builder. Use ask_llm_from_template() to invoke.
+
+def _make_prompt(system_text: str) -> ChatPromptTemplate:
+    """Build a ChatPromptTemplate that won't parse JSON braces in the system message."""
+    return ChatPromptTemplate.from_messages([
+        SystemMessage(content=system_text),
+        HumanMessagePromptTemplate.from_template("{context}"),
+    ])
+
+RCA_PROMPT            = _make_prompt(RCA_SYSTEM)
+PREDICT_PROMPT        = _make_prompt(PREDICT_SYSTEM)
+LOAD_PROMPT           = _make_prompt(LOAD_SYSTEM)
+ALERT_GROUPING_PROMPT = _make_prompt(ALERT_GROUPING_SYSTEM)
+HEALTH_QUERY_PROMPT   = _make_prompt(HEALTH_QUERY_SYSTEM)
+BLAST_RADIUS_PROMPT   = _make_prompt(BLAST_RADIUS_SYSTEM)

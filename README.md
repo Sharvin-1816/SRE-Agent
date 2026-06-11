@@ -6,8 +6,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v2.1-blue?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v3.0-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/LLM-Groq%20%2F%20Ollama-orange?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Framework-LangChain-blueviolet?style=flat-square"/>
   <img src="https://img.shields.io/badge/DB-Supabase-green?style=flat-square"/>
   <img src="https://img.shields.io/badge/Metrics-Prometheus-red?style=flat-square"/>
   <img src="https://img.shields.io/badge/Dashboard-Grafana-yellow?style=flat-square"/>
@@ -35,8 +36,14 @@ The agent factors these into every prediction, RCA, and load forecast automatica
 
 ## Versions
 
-### v2.0 — Current (Prometheus + Grafana)
-Full observability stack. Agent uses p50/p95/p99 latency from Prometheus instead of averages. Live Grafana dashboards show real-time service health.
+### v3.0 — Current (LangChain Integration)
+Full LangChain integration across the LLM and prompt layers. LLM providers (`ChatGroq`, `ChatOllama`) replace raw HTTP calls. All 6 reasoning modes use `ChatPromptTemplate` objects. Embeddings migrated to `HuggingFaceEmbeddings` via `langchain-huggingface`. Pydantic output schemas (`RCAOutput`, `PredictionOutput`, `BlastRadiusOutput`) added for structured LLM outputs. OpenTelemetry removed (not integrated).
+
+### v2.1 — Two-tier Memory
+Added short-term (last 48h) and long-term (pgvector) memory system. Pattern extraction after every agent run. Full reasoning transparency — agent displays which memories it drew from. New `memory` CLI command.
+
+### v2.0 — Prometheus + Grafana
+Full observability stack. Agent uses p50/p95/p99 latency from Prometheus instead of averages. Live Grafana dashboards show real-time service health. Grafana alert webhooks trigger the agent directly.
 
 ### v1.0 — Base Agent
 Core agentic loop with all 6 reasoning modes. No Prometheus — metrics sourced from Supabase only. Fully functional agent reasoning.
@@ -176,6 +183,7 @@ This lets the agent reason: *"Payment service is degrading AND a BOGO offer star
 | Anomaly detection | **Pure Python (Z-score + linear regression)** | Context-aware, per-service, per-time-window |
 | LLM (primary) | **Groq API** — `llama-3.3-70b-versatile` | Fast, free-tier LLM inference |
 | LLM (fallback) | **Ollama** — local Llama 3.1 | Offline fallback if Groq unavailable |
+| LLM framework | **LangChain** (`langchain`, `langchain-core`, `langchain-groq`, `langchain-ollama`, `langchain-huggingface`) | Unified LLM interface, prompt templates, structured output parsing |
 | Agent framework | **Pure Python agentic loop** | Full control over observe→reason→ask→conclude |
 | CLI | **Rich** (Python) | Terminal output and interactive prompts |
 | Containers | **Docker** | Runs Prometheus + Grafana |
@@ -339,6 +347,22 @@ And update `config/prometheus.yml` targets to point to your real service `/metri
 
 ## Changelog
 
+### v3.0
+- Integrated LangChain across the LLM and prompt layers
+- Replaced manual `httpx` Groq/Ollama HTTP calls with `ChatGroq` and `ChatOllama` (`langchain-groq`, `langchain-ollama`)
+- Introduced shared `_invoke_with_fallback(messages)` core — both `ask_llm` and `ask_llm_from_template` use it
+- Added `ask_llm_from_template(template, context)` for `ChatPromptTemplate`-based invocation
+- Added `ask_llm_structured(system, user, schema)` with `JsonOutputParser` for typed outputs
+- Added Pydantic output schemas: `RCAOutput`, `PredictionOutput`, `BlastRadiusOutput`
+- Converted all 6 reasoning mode system prompts to `ChatPromptTemplate` objects (`RCA_PROMPT`, `PREDICT_PROMPT`, etc.)
+- All 6 mode runners in `agent_loop.py` now use `ask_llm_from_template` — prompts are proper LangChain objects, not raw strings
+- `_handle_context_gap` updated to accept a `ChatPromptTemplate` instead of a raw system string
+- Replaced `sentence-transformers` `SentenceTransformer` in `embeddings.py` with `HuggingFaceEmbeddings` from `langchain-huggingface` — same model (`all-MiniLM-L6-v2`), same public interface (`embed`, `similarity`, `is_similar`)
+- Removed incomplete OpenTelemetry/Tempo integration (`otel-collector-config.yaml`, `tempo-config.yaml`, docker-compose services, context_builder imports)
+- Fixed duplicate `_metrics_source_label()` function in `context_builder.py`
+- Fixed `numpy==1.26.4` → `numpy>=2.0.0` (Python 3.13 wheel compatibility)
+- Fixed `supabase` + `httpx` version conflict
+
 ### v2.1
 - Added two-tier memory system (short term + long term patterns)
 - Short term: last 48h of agent decisions injected into every RCA and prediction prompt
@@ -388,4 +412,4 @@ And update `config/prometheus.yml` targets to point to your real service `/metri
 
 ---
 
-<p align="center">Built with Python · Groq · Supabase · Prometheus · Grafana · FastAPI · Rich</p>
+<p align="center">Built with Python · LangChain · Groq · Supabase · Prometheus · Grafana · FastAPI · Rich</p>

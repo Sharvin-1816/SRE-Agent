@@ -27,10 +27,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent.llm_adapter import ask_llm, parse_json_response
+from agent.llm_adapter import ask_llm, ask_llm_from_template, parse_json_response
 from agent.prompts import (
+    RCA_PROMPT, PREDICT_PROMPT, LOAD_PROMPT,
+    ALERT_GROUPING_PROMPT, HEALTH_QUERY_PROMPT, BLAST_RADIUS_PROMPT,
     RCA_SYSTEM, PREDICT_SYSTEM, LOAD_SYSTEM,
-    ALERT_GROUPING_SYSTEM, HEALTH_QUERY_SYSTEM, BLAST_RADIUS_SYSTEM
+    ALERT_GROUPING_SYSTEM, HEALTH_QUERY_SYSTEM, BLAST_RADIUS_SYSTEM,
 )
 from agent.context_builder import (
     build_for_rca, build_for_prediction, build_for_load_prediction,
@@ -186,10 +188,10 @@ def _display_blast_radius(result: dict):
 
 # ── Context gap handler ───────────────────────────────────────────────────────
 
-def _handle_context_gap(result: dict, system_prompt: str, user_prompt: str) -> dict:
+def _handle_context_gap(result: dict, prompt_template, user_prompt: str) -> dict:
     """
     If LLM confidence is low, ask the user for more context via CLI.
-    Save the answer to the context store and re-run.
+    Save the answer to the context store and re-run with the updated prompt.
     """
     question = result.get("context_question", "Do you have any additional context?")
 
@@ -203,17 +205,12 @@ def _handle_context_gap(result: dict, system_prompt: str, user_prompt: str) -> d
     answer = Prompt.ask("[bold yellow]Your answer[/bold yellow]")
 
     if answer.strip():
-        # Save to context store so it's available for all future reasoning
         add_user_context(answer, source="agent_question")
         console.print("[green]  ✓ Context saved. Re-running analysis...[/green]\n")
 
-        # Rebuild user prompt with updated context (re-import to get fresh context)
-        from db.database import get_context_as_text
-        updated_ctx = get_context_as_text()
         updated_prompt = user_prompt + f"\n\nADDITIONAL CONTEXT FROM USER:\n{answer}"
-
-        raw     = ask_llm(system_prompt, updated_prompt)
-        result  = parse_json_response(raw)
+        raw    = ask_llm_from_template(prompt_template, updated_prompt)
+        result = parse_json_response(raw)
 
     return result
 
@@ -234,11 +231,11 @@ def run_rca(service_name: str, signal: dict) -> dict:
     # Inject memory into prompt
     prompt = prompt + memory_text
 
-    raw    = ask_llm(RCA_SYSTEM, prompt)
+    raw    = ask_llm_from_template(RCA_PROMPT, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, RCA_SYSTEM, prompt)
+        result = _handle_context_gap(result, RCA_PROMPT, prompt)
 
     _display_rca(result, service_name)
 
@@ -274,11 +271,11 @@ def run_prediction(service_name: str, signal: dict) -> dict:
     pkg, prompt = build_for_prediction(service_name, signal)
     prompt = prompt + memory_text
 
-    raw    = ask_llm(PREDICT_SYSTEM, prompt)
+    raw    = ask_llm_from_template(PREDICT_PROMPT, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, PREDICT_SYSTEM, prompt)
+        result = _handle_context_gap(result, PREDICT_PROMPT, prompt)
 
     _display_prediction(result, service_name)
     display_used_memories(used_memories, service_name)
@@ -304,11 +301,11 @@ def run_load_prediction(service_name: str = None) -> dict:
     console.print("\n[bold]📊 Running load prediction...[/bold]")
     pkg, prompt = build_for_load_prediction(service_name)
 
-    raw    = ask_llm(LOAD_SYSTEM, prompt)
+    raw    = ask_llm_from_template(LOAD_PROMPT, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, LOAD_SYSTEM, prompt)
+        result = _handle_context_gap(result, LOAD_PROMPT, prompt)
 
     _display_load(result)
 
@@ -338,11 +335,11 @@ def run_alert_grouping() -> dict:
     # Retrieve the short→full UUID map attached by context_builder
     id_map = pkg.pop("_id_map", {})
 
-    raw    = ask_llm(ALERT_GROUPING_SYSTEM, prompt)
+    raw    = ask_llm_from_template(ALERT_GROUPING_PROMPT, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, ALERT_GROUPING_SYSTEM, prompt)
+        result = _handle_context_gap(result, ALERT_GROUPING_PROMPT, prompt)
 
     _display_alert_grouping(result)
 
@@ -377,11 +374,11 @@ def run_health_query(question: str) -> dict:
     console.print(f"\n[bold]💬 Health query: {question}[/bold]")
     pkg, prompt = build_for_health_query(question)
 
-    raw    = ask_llm(HEALTH_QUERY_SYSTEM, prompt)
+    raw    = ask_llm_from_template(HEALTH_QUERY_PROMPT, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, HEALTH_QUERY_SYSTEM, prompt)
+        result = _handle_context_gap(result, HEALTH_QUERY_PROMPT, prompt)
 
     _display_health_query(result, question)
 
@@ -400,11 +397,11 @@ def run_blast_radius(service_name: str, signal: dict = None) -> dict:
     console.print(f"\n[bold]💥 Running blast radius for {service_name}...[/bold]")
     pkg, prompt = build_for_blast_radius(service_name, signal)
 
-    raw    = ask_llm(BLAST_RADIUS_SYSTEM, prompt)
+    raw    = ask_llm_from_template(BLAST_RADIUS_PROMPT, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, BLAST_RADIUS_SYSTEM, prompt)
+        result = _handle_context_gap(result, BLAST_RADIUS_PROMPT, prompt)
 
     _display_blast_radius(result)
 
