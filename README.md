@@ -337,6 +337,8 @@ Then create a contact point: Alerting → Notification configuration → Add con
 
 When an alert fires, Grafana POSTs to the webhook receiver which triggers the agent within 10-25 seconds — no waiting for the 60s collector poll.
 
+<img width="1281" height="469" alt="Screenshot 2026-06-11 175816" src="https://github.com/user-attachments/assets/fcf69f78-b8df-498e-816d-9f1076cddff5" />
+
 **9. Open Grafana**
 - Go to `http://localhost:3000`
 - Login: `admin` / `sreagent`
