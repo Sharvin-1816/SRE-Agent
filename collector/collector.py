@@ -6,7 +6,23 @@ On each reading:
   1. Stores raw metrics to Supabase
   2. Runs anomaly detection (Z-score + trend)
   3. Updates baseline profiles incrementally
-  4. Triggers agent if anomaly detected
+  4. Triggers agent only when warranted (cooldown + severity gating)
+
+Domino prevention — two layers:
+  Layer 1: Cooldown registry per service. After the agent analyses a
+           service, that service is locked out for COOLDOWN_MINUTES.
+           Only a severity escalation (score jump) or DOWN status
+           overrides the cooldown.
+
+  Layer 2: Minimum anomaly score to trigger the agent at all.
+           Low z-scores (3.0-4.0) write to DB only — no LLM call.
+           Score thresholds are configurable via .env.
+
+Score thresholds:
+  score < AGENT_MIN_SCORE          → DB write only, no agent
+  score >= AGENT_MIN_SCORE         → agent trigger if not in cooldown
+  score >= AGENT_ALWAYS_SCORE      → agent trigger always, overrides cooldown
+  service DOWN                     → agent trigger always, overrides cooldown
 
 Run: python -m collector.collector
 """
@@ -46,20 +62,111 @@ SERVICES = {
     "gateway_service":      "http://localhost:3006",
 }
 
-POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL_SECONDS",   "60"))
-BASELINE_EVERY  = 10   # recompute baseline every N polls
+POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+BASELINE_EVERY = 10
+
+# ── Domino prevention config ──────────────────────────────────────────────────
+
+# Minutes a service stays in cooldown after the agent analyses it
+COOLDOWN_MINUTES = int(os.getenv("AGENT_COOLDOWN_MINUTES", "10"))
+
+# Minimum anomaly score to trigger the agent at all
+# Below this: write to DB only, no LLM call
+AGENT_MIN_SCORE = float(os.getenv("AGENT_MIN_SCORE", "30"))
+
+# Score at which the agent triggers regardless of cooldown
+AGENT_ALWAYS_SCORE = float(os.getenv("AGENT_ALWAYS_SCORE", "80"))
+
+# In-memory cooldown registry
+# Key: service_name  Value: (last_triggered_at, last_score)
+_cooldown: dict[str, tuple[datetime, float]] = {}
+
+
+def _compute_anomaly_score(signal: dict) -> float:
+    """
+    Composite anomaly score 0-100 combining:
+      - Z-score magnitude    (0-50 points)
+      - Number of anomalous metrics (0-20 points)
+      - Service DOWN flag    (0-30 points)
+
+    This replaces the binary "anomaly yes/no" decision with a
+    graduated scale so low z-scores don't trigger the full LLM pipeline.
+    """
+    if not signal:
+        return 0.0
+
+    snapshot = signal.get("metrics_snapshot", {})
+    if not snapshot:
+        return 0.0
+
+    # Component 1 — z-score magnitude (0-50)
+    z_scores = [
+        v.get("z_score", 0)
+        for v in snapshot.values()
+        if isinstance(v, dict)
+    ]
+    max_z     = max(z_scores, default=0)
+    # z=3 → 15pts, z=5 → 25pts, z=8 → 40pts, z=12+ → 50pts
+    z_score_pts = min(50.0, (max_z / 12.0) * 50.0)
+
+    # Component 2 — breadth (how many metrics are anomalous) (0-20)
+    anomalous_count = sum(
+        1 for v in snapshot.values()
+        if isinstance(v, dict) and v.get("z_score", 0) >= 3.0
+    )
+    breadth_pts = min(20.0, anomalous_count * 5.0)
+
+    # Component 3 — service DOWN (0-30)
+    severity    = signal.get("severity", "low")
+    down_pts    = 30.0 if severity == "critical" else 0.0
+
+    score = round(z_score_pts + breadth_pts + down_pts, 1)
+    return score
+
+
+def _in_cooldown(service_name: str, current_score: float) -> tuple[bool, str]:
+    """
+    Check whether a service is in cooldown.
+
+    Returns (suppressed: bool, reason: str).
+
+    Cooldown is overridden when:
+      - Score exceeds AGENT_ALWAYS_SCORE (genuine escalation)
+      - Service is DOWN (severity = critical)
+      - Score has increased by more than 20 points since last trigger
+        (situation is getting worse, not stable)
+    """
+    entry = _cooldown.get(service_name)
+    if not entry:
+        return False, "no prior trigger"
+
+    last_triggered, last_score = entry
+    elapsed_minutes = (datetime.now(timezone.utc) - last_triggered).total_seconds() / 60
+
+    if elapsed_minutes >= COOLDOWN_MINUTES:
+        return False, f"cooldown expired ({elapsed_minutes:.1f} min ago)"
+
+    if current_score >= AGENT_ALWAYS_SCORE:
+        return False, f"score {current_score} exceeds always-trigger threshold ({AGENT_ALWAYS_SCORE})"
+
+    if current_score - last_score >= 20:
+        return False, f"severity escalated ({last_score} → {current_score})"
+
+    remaining = COOLDOWN_MINUTES - elapsed_minutes
+    return True, f"cooldown active — {remaining:.1f} min remaining (last score: {last_score})"
+
+
+def _record_trigger(service_name: str, score: float):
+    """Record that the agent was triggered for this service."""
+    _cooldown[service_name] = (datetime.now(timezone.utc), score)
 
 
 # ── Poll a single service ─────────────────────────────────────────────────────
 
 def poll_service(service_name: str, base_url: str) -> dict:
-    """
-    Ping the service's /metrics endpoint and return a normalised metric row.
-    If the service is unreachable, returns a row marking it down.
-    """
     start = time.monotonic()
     try:
-        resp = httpx.get(f"{base_url}/metrics/json", timeout=5.0)
+        resp       = httpx.get(f"{base_url}/metrics/json", timeout=5.0)
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
 
         if resp.status_code == 200:
@@ -84,10 +191,8 @@ def poll_service(service_name: str, base_url: str) -> dict:
     except httpx.TimeoutException:
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
         return _unreachable_row(service_name, 0, "Timeout after 5s", elapsed_ms)
-
     except httpx.ConnectError:
         return _unreachable_row(service_name, 0, "Connection refused", 0)
-
     except Exception as e:
         return _unreachable_row(service_name, 0, str(e), 0)
 
@@ -111,7 +216,6 @@ def _unreachable_row(service_name: str, status: int, error: str, rt: float) -> d
 # ── Baseline updater ──────────────────────────────────────────────────────────
 
 def _get_time_window(hour: int) -> tuple[str, int, int]:
-    """Returns (window_name, hour_start, hour_end)."""
     if   0  <= hour < 6:  return "weekday_overnight",  0,  6
     elif 6  <= hour < 12: return "weekday_morning",    6, 12
     elif 12 <= hour < 18: return "weekday_afternoon", 12, 18
@@ -119,11 +223,7 @@ def _get_time_window(hour: int) -> tuple[str, int, int]:
 
 
 def update_baseline(service_name: str):
-    """
-    Recompute and upsert the baseline profile for the current time window.
-    Called every BASELINE_EVERY polls.
-    """
-    now         = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     window_name, h_start, h_end = _get_time_window(now.hour)
 
     try:
@@ -133,7 +233,7 @@ def update_baseline(service_name: str):
         return
 
     if len(rows) < 10:
-        return  # not enough data yet
+        return
 
     def _stats(values):
         arr = [v for v in values if v is not None]
@@ -164,33 +264,44 @@ def update_baseline(service_name: str):
 # ── Display ───────────────────────────────────────────────────────────────────
 
 def _print_poll_summary(results: list[tuple[str, dict]]):
-    """Print a clean table of current service health to the terminal."""
-    table = Table(title=f"[bold]Poll — {datetime.now().strftime('%H:%M:%S')}[/bold]",
-                  show_lines=False)
-    table.add_column("Service",      style="cyan",  width=24)
-    table.add_column("Status",       style="white", width=8)
-    table.add_column("RT (ms)",      justify="right")
-    table.add_column("Error %",      justify="right")
-    table.add_column("Throughput",   justify="right")
-    table.add_column("CPU %",        justify="right")
-    table.add_column("Memory %",     justify="right")
+    table = Table(
+        title=f"[bold]Poll — {datetime.now().strftime('%H:%M:%S')}[/bold]",
+        show_lines=False,
+    )
+    table.add_column("Service",    style="cyan", width=24)
+    table.add_column("Status",     width=8)
+    table.add_column("RT (ms)",    justify="right")
+    table.add_column("Error %",    justify="right")
+    table.add_column("Throughput", justify="right")
+    table.add_column("CPU %",      justify="right")
+    table.add_column("Memory %",   justify="right")
 
     for service_name, row in results:
-        ok   = row["is_reachable"]
-        rt   = row["response_time_ms"]
-        er   = row["error_rate_pct"]
-        tp   = row["throughput_rps"]
-        cpu  = row["cpu_pct"]
-        mem  = row["memory_pct"]
+        ok  = row["is_reachable"]
+        rt  = row["response_time_ms"]
+        er  = row["error_rate_pct"]
+        tp  = row["throughput_rps"]
+        cpu = row["cpu_pct"]
+        mem = row["memory_pct"]
 
-        status_str = "[green]UP[/green]" if ok else "[red]DOWN[/red]"
-        rt_str     = f"[red]{rt:.0f}[/red]"   if rt  > 1000 else f"{rt:.0f}"
-        er_str     = f"[red]{er:.1f}[/red]"   if er  > 5    else f"{er:.1f}"
-        tp_str     = f"[yellow]{tp:.0f}[/yellow]" if tp < 50 else f"{tp:.0f}"
-        cpu_str    = f"[red]{cpu:.1f}[/red]"  if cpu > 85   else f"{cpu:.1f}"
-        mem_str    = f"[red]{mem:.1f}[/red]"  if mem > 85   else f"{mem:.1f}"
+        # Show cooldown indicator in service name if active
+        cd_entry = _cooldown.get(service_name)
+        cd_indicator = ""
+        if cd_entry:
+            elapsed = (datetime.now(timezone.utc) - cd_entry[0]).total_seconds() / 60
+            if elapsed < COOLDOWN_MINUTES:
+                remaining = COOLDOWN_MINUTES - elapsed
+                cd_indicator = f" [dim](cd {remaining:.0f}m)[/dim]"
 
-        table.add_row(service_name, status_str, rt_str, er_str, tp_str, cpu_str, mem_str)
+        table.add_row(
+            service_name + cd_indicator,
+            "[green]UP[/green]"   if ok  else "[red]DOWN[/red]",
+            f"[red]{rt:.0f}[/red]"   if rt  > 1000 else f"{rt:.0f}",
+            f"[red]{er:.1f}[/red]"   if er  > 5    else f"{er:.1f}",
+            f"[yellow]{tp:.0f}[/yellow]" if tp < 50 else f"{tp:.0f}",
+            f"[red]{cpu:.1f}[/red]"  if cpu > 85   else f"{cpu:.1f}",
+            f"[red]{mem:.1f}[/red]"  if mem > 85   else f"{mem:.1f}",
+        )
 
     console.print(table)
 
@@ -199,38 +310,39 @@ def _print_poll_summary(results: list[tuple[str, dict]]):
 
 _poll_count = 0
 
+
 def poll_all_services():
     """
     Called by APScheduler every POLL_INTERVAL seconds.
-    Polls all services, writes metrics, runs anomaly detection.
+    Polls all services, writes metrics, runs anomaly detection,
+    applies cooldown + severity gating before triggering agent.
     """
     global _poll_count
     _poll_count += 1
 
     results   = []
-    anomalies = []
+    anomalies = []   # (service_name, signal, score)
 
     for service_name, base_url in SERVICES.items():
         row = poll_service(service_name, base_url)
 
-        # Write to DB
         try:
             insert_metric(row)
         except Exception as e:
             console.print(f"[red]  DB write failed for {service_name}: {e}[/red]")
             continue
 
-        # Anomaly detection on every reading
         try:
             signal = check_for_anomalies(row)
             if signal:
-                anomalies.append((service_name, signal))
+                score = _compute_anomaly_score(signal)
+                console.print(f"  [dim]Anomaly detected: {service_name} score={score}[/dim]")
+                anomalies.append((service_name, signal, score))
         except Exception as e:
             console.print(f"[yellow]  Anomaly check error for {service_name}: {e}[/yellow]")
 
         results.append((service_name, row))
 
-        # Update baseline every N polls
         if _poll_count % BASELINE_EVERY == 0:
             try:
                 update_baseline(service_name)
@@ -239,36 +351,73 @@ def poll_all_services():
 
     _print_poll_summary(results)
 
-    # If anomalies found, only trigger agent for the WORST one per poll.
-    # Running 4 LLM calls × N anomalies hammers the Groq rate limit fast.
-    # The agent sees all correlated services in its context anyway, so
-    # analysing the worst anomaly captures the full picture.
-    if anomalies:
-        # Sort by max z-score descending, pick the worst
-        worst_service, worst_signal = max(
-            anomalies,
-            key=lambda x: x[1].get("metrics_snapshot", {}) and
-                max((v.get("z_score", 0) for v in x[1].get("metrics_snapshot", {}).values()), default=0)
-                if isinstance(x[1].get("metrics_snapshot"), dict) else 0
+    if not anomalies:
+        return
+
+    # Sort by score descending
+    anomalies.sort(key=lambda x: x[2], reverse=True)
+
+    triggered   = False
+    trigger_log = []
+
+    for service_name, signal, score in anomalies:
+        # Check if service is DOWN — always trigger, no gating
+        is_down = not any(
+            r[1].get("is_reachable", True)
+            for r in results
+            if r[0] == service_name
         )
-        console.print(
-            f"\n[bold red]  {len(anomalies)} anomaly signal(s) detected — "
-            f"triggering agent for worst: {worst_service}[/bold red]"
+
+        # Cooldown check — skip if recently triggered
+        # unless service is DOWN or score is very high
+        suppressed, reason = _in_cooldown(service_name, score)
+
+        if suppressed and not is_down and score < AGENT_ALWAYS_SCORE:
+            trigger_log.append(
+                f"  [dim]{service_name}: suppressed ({reason})[/dim]"
+            )
+            continue
+
+        # Trigger agent
+        trigger_log.append(
+            f"  [bold red]{service_name}: score={score} — triggering agent "
+            f"({'DOWN' if is_down else reason})[/bold red]"
         )
+        _record_trigger(service_name, score)
+
         try:
             from agent.agent_loop import run_agent
-            run_agent(trigger="anomaly_detected", service_name=worst_service, signal=worst_signal)
+            run_agent(
+                trigger="anomaly_detected",
+                service_name=service_name,
+                signal=signal,
+            )
         except Exception as e:
             console.print(f"[red]  Agent trigger failed: {e}[/red]")
+
+        triggered = True
+        break
+
+    if trigger_log:
+        console.print(f"\n[bold]  {len(anomalies)} anomaly signal(s) detected:[/bold]")
+        for line in trigger_log:
+            console.print(line)
+
+    if not triggered and anomalies:
+        console.print(
+            f"  [dim]All {len(anomalies)} signal(s) suppressed by cooldown[/dim]"
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     console.rule("[bold cyan]SRE Agent — Collector Started[/bold cyan]")
-    console.print(f"  Polling {len(SERVICES)} services every {POLL_INTERVAL}s\n")
+    console.print(f"  Polling {len(SERVICES)} services every {POLL_INTERVAL}s")
+    console.print(f"  Agent cooldown: {COOLDOWN_MINUTES} min per service")
+    console.print(f"  Min score to trigger agent: {AGENT_MIN_SCORE}")
+    console.print(f"  Always-trigger score: {AGENT_ALWAYS_SCORE}\n")
 
-    # Graceful shutdown
     def _shutdown(sig, frame):
         console.print("\n[yellow]Shutting down collector...[/yellow]")
         scheduler.shutdown(wait=False)
@@ -277,7 +426,6 @@ def main():
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Run once immediately on startup
     poll_all_services()
 
     scheduler = BlockingScheduler(timezone="UTC")
@@ -285,11 +433,14 @@ def main():
         poll_all_services,
         trigger=IntervalTrigger(seconds=POLL_INTERVAL),
         id="poll_all",
-        max_instances=1,        # never overlap if a poll takes long
+        max_instances=1,
         misfire_grace_time=10,
     )
 
-    console.print(f"\n[green]Scheduler running. Next poll in {POLL_INTERVAL}s. Ctrl+C to stop.[/green]\n")
+    console.print(
+        f"[green]Scheduler running. Next poll in {POLL_INTERVAL}s. "
+        f"Ctrl+C to stop.[/green]\n"
+    )
     scheduler.start()
 
 

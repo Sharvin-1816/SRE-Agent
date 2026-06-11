@@ -370,9 +370,8 @@ def check_for_anomalies(metric_row: dict) -> Optional[dict]:
     # 1. Get baseline for this service + time window
     baseline = get_baseline(service_name, time_window)
     if baseline is None:
-        # Not enough historical data yet — fall back to loose absolute thresholds
-        _check_absolute_fallback(metric_row, service_name, detected_at)
-        return None
+        # Not enough historical data yet — use absolute fallback
+        return _check_absolute_fallback(metric_row, service_name, detected_at)
 
     # 2. Compute z-scores
     anomalies = _compute_zscores(metric_row, baseline)
@@ -438,20 +437,64 @@ def check_for_anomalies(metric_row: dict) -> Optional[dict]:
     return signal
 
 
-def _check_absolute_fallback(metric_row: dict, service_name: str, detected_at: datetime):
+def _check_absolute_fallback(metric_row: dict, service_name: str, detected_at: datetime) -> Optional[dict]:
     """
-    Used when baseline isn't built yet (< 50 samples).
-    Very loose absolute limits so we catch obvious crashes.
+    Used when baseline is not built yet (< 10 samples).
+    Catches obvious crashes and genuine degradation even without a baseline.
+    Returns a signal dict if something is clearly wrong, None if everything looks fine.
     """
     FALLBACK = {
-        "response_time_ms": 5000,
-        "error_rate_pct":   20.0,
-        "cpu_pct":          95.0,
-        "memory_pct":       95.0,
+        "response_time_ms": 4000,
+        "error_rate_pct":   5.0,
+        "cpu_pct":          85.0,
+        "memory_pct":       85.0,
     }
+
+    # Service DOWN is always an anomaly regardless of baseline
+    if not metric_row.get("is_reachable", True):
+        signal = {
+            "service_name":    service_name,
+            "severity":        "critical",
+            "human_summary": (
+                f"{service_name.replace('_', ' ').title()} is DOWN — "
+                "connection refused or timeout. No baseline needed to flag this."
+            ),
+            "metrics_snapshot": {
+                "uptime_pct": {
+                    "current_value": 0,
+                    "z_score":       99.0,
+                    "severity":      "critical",
+                    "normal_range":  "100%",
+                }
+            },
+            "trend_summary":       "Service became unreachable.",
+            "hypothesis_hints":    ["Service process crashed or restarted"],
+            "correlated_services": [],
+            "context_window":      "no_baseline",
+        }
+        insert_alert({
+            "service_name": service_name,
+            "anomaly_id":   None,
+            "triggered_at": detected_at.isoformat(),
+            "metric":       "uptime_pct",
+            "severity":     "critical",
+            "message":      f"[FALLBACK] {service_name} is DOWN — no baseline needed.",
+        })
+        return signal
+
+    breached = []
+    snapshot = {}
+
     for metric, limit in FALLBACK.items():
         val = metric_row.get(metric)
-        if val and val > limit:
+        if val is not None and val > limit:
+            breached.append((metric, val, limit))
+            snapshot[metric] = {
+                "current_value": val,
+                "z_score":       round((val - limit) / max(limit * 0.1, 1), 1),
+                "severity":      "high",
+                "normal_range":  f"below {limit}",
+            }
             insert_alert({
                 "service_name": service_name,
                 "anomaly_id":   None,
@@ -463,3 +506,25 @@ def _check_absolute_fallback(metric_row: dict, service_name: str, detected_at: d
                     "Baseline not yet established."
                 ),
             })
+
+    if not breached:
+        return None
+
+    summary_parts = [
+        f"{m.replace('_', ' ')} is {v} (limit: {l})"
+        for m, v, l in breached
+    ]
+    signal = {
+        "service_name":    service_name,
+        "severity":        "high",
+        "human_summary": (
+            f"{service_name.replace('_', ' ').title()} has breached absolute thresholds "
+            f"(no baseline yet): {'; '.join(summary_parts)}."
+        ),
+        "metrics_snapshot":    snapshot,
+        "trend_summary":       "Baseline not yet established — using absolute thresholds.",
+        "hypothesis_hints":    ["No baseline yet — this may be startup noise or a genuine incident"],
+        "correlated_services": [],
+        "context_window":      "no_baseline",
+    }
+    return signal

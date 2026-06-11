@@ -314,11 +314,28 @@ python -m collector.collector
 python main.py
 ```
 
-**8. Optional — Start webhook receiver**
+**8. Optional — Start webhook receiver (for Grafana alerts)**
 ```bash
-# Terminal 4 — Grafana alert webhooks
+# Terminal 4 — receives Grafana alerts, triggers agent automatically
 python -m api.webhook_receiver
 ```
+
+**9. Set up Grafana Alert Rules**
+
+Once the webhook receiver is running, create these alert rules in Grafana (`http://localhost:3000` → Alerting → Alert rules):
+
+| Rule | Query | Condition | Pending |
+|---|---|---|---|
+| Service Down | `up{job="sre_services"}` | IS BELOW 1 | None |
+| High Error Rate | `max by(service_name) (sre_error_rate_percent)` | IS ABOVE 5 | 30s |
+| High p95 Latency | `max by(service_name) (histogram_quantile(0.95, rate(sre_request_duration_ms_bucket[2m])))` | IS ABOVE 4000 | 30s |
+| High CPU Usage | `max by(service_name) (sre_cpu_percent)` | IS ABOVE 90 | 30s |
+
+For each rule: folder = `SRE Agent`, evaluation group = `sre-agent-group` (interval 10s).
+
+Then create a contact point: Alerting → Notification configuration → Add contact point → Type: Webhook → URL: `http://host.docker.internal:5001/webhook/grafana`
+
+When an alert fires, Grafana POSTs to the webhook receiver which triggers the agent within 10-25 seconds — no waiting for the 60s collector poll.
 
 **9. Open Grafana**
 - Go to `http://localhost:3000`
@@ -442,10 +459,12 @@ Update `config/prometheus.yml` targets to point to your real service `/metrics` 
 - [x] Two-tier memory (short term + long term with pgvector)
 - [x] Grafana webhook integration
 - [x] LangChain integration (prompt templates, model wrappers, structured outputs)
+- [x] Grafana alert rules — near-instant detection (10-25s vs 60s collector poll)
+- [ ] Intelligent memory retrieval (LangChain VectorStore semantic search)
 - [ ] Agent decision panel in Grafana
 - [ ] Scheduled proactive analysis (not just on anomaly)
 - [ ] OpenTelemetry distributed tracing
-- [ ] Memory outcome tracking — collector auto-updates prediction accuracy
+- [ ] Memory outcome tracking automation
 - [ ] Slack/Teams notification integration
 
 ---
