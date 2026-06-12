@@ -6,11 +6,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v3.0-blue?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-v3.1-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/LLM-Groq%20%2F%20Ollama-orange?style=flat-square"/>
   <img src="https://img.shields.io/badge/Framework-LangChain-blueviolet?style=flat-square"/>
   <img src="https://img.shields.io/badge/DB-Supabase%20%2B%20pgvector-green?style=flat-square"/>
   <img src="https://img.shields.io/badge/Metrics-Prometheus-red?style=flat-square"/>
+  <img src="https://img.shields.io/badge/Logs-Grafana%20Loki-orange?style=flat-square"/>
   <img src="https://img.shields.io/badge/Dashboard-Grafana-yellow?style=flat-square"/>
   <img src="https://img.shields.io/badge/Backend-Python-blue?style=flat-square"/>
   <img src="https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square"/>
@@ -36,20 +37,23 @@ The agent factors these into every prediction, RCA, and load forecast automatica
 
 ## Versions
 
-### v3.0 — Current (LangChain Integration)
+### v3.1 — Current
+Grafana Loki log aggregation. Intelligent semantic memory retrieval using pgvector similarity search on agent outputs — agent now finds the most relevant past decisions rather than the most recent ones. Single-terminal startup via `start.py`. Structured JSON logging across all components shipped to Loki via Promtail.
+
+### v3.0 — LangChain Integration
 Full LangChain integration across the LLM and prompt layers. Manual `httpx` HTTP calls replaced with `ChatGroq` and `ChatOllama`. All 6 reasoning modes use `ChatPromptTemplate` objects. Embeddings migrated to `HuggingFaceEmbeddings` via `langchain-huggingface`. Pydantic output schemas added for structured LLM outputs.
 
 ### v2.2 — Webhook Support + pgvector Memory
-Grafana alert webhooks trigger the agent directly. Memory deduplication upgraded to pgvector cosine similarity — semantically similar patterns are merged instead of creating duplicates. `sentence-transformers` replaced with `HuggingFaceEmbeddings`.
+Grafana alert webhooks trigger the agent directly. Memory deduplication upgraded to pgvector cosine similarity. Cooldown registry prevents domino triggering.
 
 ### v2.1 — Two-tier Memory
-Added short-term (last 48h) and long-term (pgvector) memory. Pattern extraction after every agent run. Full reasoning transparency — agent displays which memories it drew from. New `memory` CLI command.
+Short-term (last 48h) and long-term (pgvector) memory. Pattern extraction after every agent run. Full reasoning transparency — agent displays which memories it drew from.
 
 ### v2.0 — Prometheus + Grafana
 Full observability stack. Agent uses p50/p95/p99 latency from Prometheus instead of averages. Live Grafana dashboards show real-time service health.
 
 ### v1.0 — Base Agent
-Core agentic loop with all 6 reasoning modes. Metrics sourced from Supabase only. Fully functional agent reasoning.
+Core agentic loop with all 6 reasoning modes. Metrics sourced from Supabase only.
 
 See [Releases](../../releases) to download any version.
 
@@ -67,8 +71,10 @@ See [Releases](../../releases) to download any version.
 | **Blast Radius Estimator** | When a service degrades, predicts which downstream services will be affected and by how much |
 | **Operator Context** | User feeds plain-English events; agent uses them to reason about all predictions |
 | **Agentic Loop** | If confidence is low, agent asks the user a targeted question before concluding |
-| **Memory System** | Agent remembers past incidents and patterns across sessions — reasoning improves over time |
-| **Grafana Webhooks** | Grafana alert rules trigger the agent automatically with deduplication |
+| **Semantic Memory** | Agent retrieves the most relevant past incidents using pgvector similarity — not just the most recent |
+| **Grafana Alerts** | Alert rules trigger the agent within 10-25 seconds — no waiting for the 60s collector poll |
+| **Loki Log Aggregation** | Structured JSON logs from all components shipped to Grafana Loki via Promtail |
+| **Single Terminal Startup** | All components start with one command — `python start.py` |
 
 ---
 
@@ -87,12 +93,14 @@ flowchart TD
 
     subgraph OBS["Observability — Docker"]
         PROM["Prometheus\nscrape /metrics every 15s\np50 / p95 / p99 latency"]
-        GRAF["Grafana\nlive dashboards\nalert rules + contact point"]
+        GRAF["Grafana\ndashboards · alert rules\ncontact point → webhook"]
+        LOKI["Grafana Loki\nlog aggregation\nstructured JSON logs"]
+        PROMTAIL["Promtail\nships logs/ → Loki"]
     end
 
     subgraph COL["Collection + Detection"]
         COLL["Collector — APScheduler\npoll /metrics/json every 60s\nwrites to Supabase"]
-        ANOM["Anomaly Detector\nZ-score per service per time window\ntrend detection · LLM signal formatter"]
+        ANOM["Anomaly Detector\nZ-score per service per time window\ncooldown registry · signal scoring"]
     end
 
     subgraph HOOK["Webhook Receiver — FastAPI :5001"]
@@ -100,7 +108,7 @@ flowchart TD
     end
 
     subgraph MEM["Memory System"]
-        STM["Short term\nlast 48h agent decisions"]
+        STM["Short term\nsemantic search on agent_outputs\npgvector similarity — most relevant"]
         LTM["Long term patterns\npgvector · HuggingFaceEmbeddings\ncosine similarity deduplication"]
     end
 
@@ -121,7 +129,7 @@ flowchart TD
 
     subgraph DB["Supabase — PostgreSQL + pgvector"]
         T1["metrics_raw"]
-        T2["agent_outputs"]
+        T2["agent_outputs\n+ signal_embedding vector(384)"]
         T3["context_store"]
         T4["anomaly_events"]
         T5["incidents"]
@@ -141,26 +149,31 @@ flowchart TD
     LOOP --> LLM
     LLM --> OUT
     OUT --> DB
+    OUT -->|"embed + store signal"| STM
     OUT -->|"extract + store pattern"| LTM
     DB --> STM
     DB --> LTM
+    PROMTAIL -->|"ships logs"| LOKI
+    LOKI --> GRAF
 ```
 
 ### Why Z-score instead of thresholds?
 
 A response time of 800ms at 3 AM is suspicious. The same 800ms during a Friday evening flash sale is normal. Fixed thresholds cannot tell the difference. The anomaly engine builds a rolling baseline per service per time-of-day window and flags deviations in standard deviations — not absolute values.
 
-### Why Prometheus and Supabase together?
+### Why semantic memory retrieval?
 
-| Prometheus | Supabase |
-|---|---|
-| Live p50/p95/p99 latency | Agent outputs — every LLM response stored |
-| Real-time scraping every 15s | Anomaly events and z-score history |
-| Powers Grafana dashboards | Baseline profiles per service |
-| Agent live context | Operator context store |
-| | Memory patterns with pgvector embeddings |
+The agent embeds each anomaly signal as a 384-dimensional vector and stores it alongside every agent output. On the next run, it searches past decisions by vector similarity — finding the most semantically relevant past experience regardless of when it happened. Running RCA on a CPU spike retrieves past CPU-related RCAs, not unrelated load predictions.
 
-Prometheus gives the agent richer real-time data. Supabase gives it memory, history, and persistence. Neither replaces the other.
+### Why Prometheus, Loki, and Supabase together?
+
+| Prometheus | Loki | Supabase |
+|---|---|---|
+| Live p50/p95/p99 latency | Structured logs from all components | Agent outputs and memory patterns |
+| Real-time scraping every 15s | Shipped via Promtail automatically | Anomaly events and baselines |
+| Powers Grafana metric dashboards | Searchable in Grafana Explore | Operator context store |
+
+All three are visible in one Grafana instance — metrics, logs, and agent history in one place.
 
 ### Why operator context matters
 
@@ -188,18 +201,21 @@ Note: Chroma can also be used as an alternative vector store.
 |---|---|---|
 | Mock services | **FastAPI** (Python) | 6 simulated microservices with realistic failure modes |
 | Metrics collection | **Prometheus** | Scrapes all services every 15s, stores p50/p95/p99 |
-| Visualization | **Grafana** | Live dashboards — request rate, latency, errors, CPU |
+| Log aggregation | **Grafana Loki + Promtail** | Ships structured JSON logs from all components to Grafana |
+| Visualization | **Grafana** | Live dashboards, alert rules, log explorer |
 | Scheduler | **APScheduler** | Polls services every 60s, runs anomaly detection |
 | Database | **Supabase (PostgreSQL + pgvector)** | Agent outputs, baselines, context, memory patterns |
-| Anomaly detection | **Pure Python (Z-score + linear regression)** | Context-aware, per-service, per-time-window |
+| Anomaly detection | **Pure Python (Z-score + linear regression)** | Context-aware, per-service, per-time-window, cooldown gating |
 | LLM (primary) | **Groq API** via `langchain-groq` — `llama-3.3-70b-versatile` | Fast, free-tier LLM inference |
 | LLM (fallback) | **Ollama** via `langchain-ollama` — local Llama 3.1 | Offline fallback if Groq unavailable |
-| LLM framework | **LangChain** — `langchain`, `langchain-core`, `langchain-groq`, `langchain-ollama`, `langchain-huggingface` | Unified LLM interface, prompt templates, structured output parsing |
-| Embeddings | **HuggingFaceEmbeddings** — `all-MiniLM-L6-v2` (384-dim) | Local embeddings for pgvector memory deduplication |
+| LLM framework | **LangChain** | Unified LLM interface, prompt templates, structured output parsing |
+| Embeddings | **HuggingFaceEmbeddings** — `all-MiniLM-L6-v2` (384-dim) | Local embeddings for pgvector semantic search and deduplication |
+| Memory retrieval | **pgvector similarity search** | Finds most relevant past decisions by cosine similarity |
 | Agent framework | **Pure Python agentic loop** | Full control over observe → reason → ask → conclude |
 | Webhooks | **FastAPI** on port 5001 | Receives Grafana alerts, triggers agent with deduplication |
+| Logging | **Structured JSON + agent/logger.py** | All component logs shipped to Loki |
 | CLI | **Rich** (Python) | Terminal output and interactive prompts |
-| Containers | **Docker** | Runs Prometheus and Grafana |
+| Containers | **Docker** | Runs Prometheus, Grafana, Loki, Promtail |
 
 ---
 
@@ -207,17 +223,18 @@ Note: Chroma can also be used as an alternative vector store.
 
 ```
 sre_agent/
-  docker-compose.yml            # Prometheus + Grafana containers
+  start.py                      # Single entry point — starts everything in one terminal
+  docker-compose.yml            # Prometheus + Grafana + Loki + Promtail
 
   db/
-    schema.sql                  # All Supabase tables including agent_memory_patterns
-    rpc_functions.sql           # Postgres functions including pgvector similarity search
-    database.py                 # All DB operations — single source of truth
+    schema.sql                  # All Supabase tables including pgvector columns
+    rpc_functions.sql           # pgvector similarity search RPC functions
+    database.py                 # All DB operations
     seed.py                     # 7 days of realistic mock data
 
   collector/
-    collector.py                # APScheduler — polls services, triggers agent on anomaly
-    anomaly_detector.py         # Z-score + trend detection — produces LLM-ready signals
+    collector.py                # APScheduler — polls services, cooldown gating, agent trigger
+    anomaly_detector.py         # Z-score + trend + fallback thresholds
 
   services/
     base_service.py             # Base class with Prometheus metrics + background simulator
@@ -227,29 +244,38 @@ sre_agent/
 
   agent/
     llm_adapter.py              # LangChain — ChatGroq/ChatOllama, ask_llm, ask_llm_from_template
-    prompts.py                  # System prompt strings + ChatPromptTemplate objects for all 6 modes
+    prompts.py                  # System prompt strings + ChatPromptTemplate objects
     context_builder.py          # Assembles full context — Prometheus + Supabase + operator context
     prometheus_adapter.py       # Queries Prometheus HTTP API with PromQL
     agent_loop.py               # Core loop: observe → reason → ask → conclude
-    memory.py                   # Two-tier memory — short term (48h) + long term patterns
-    embeddings.py               # HuggingFaceEmbeddings wrapper for pgvector deduplication
+    memory.py                   # Semantic retrieval — pgvector search on agent_outputs + patterns
+    embeddings.py               # HuggingFaceEmbeddings wrapper
+    logger.py                   # Structured JSON logger — writes to logs/ shipped by Promtail
 
   api/
-    webhook_receiver.py         # FastAPI on :5001 — receives Grafana alerts, triggers agent
-    decisions_api.py            # FastAPI on :5000 — exposes agent outputs for Grafana (parked)
+    webhook_receiver.py         # FastAPI :5001 — Grafana alerts → agent trigger
+    decisions_api.py            # FastAPI :5000 — agent outputs for Grafana (parked)
     parsers/
-      grafana.py                # Parses Grafana unified alerting webhook payload
-      normaliser.py             # Converts all alert formats to internal schema
+      grafana.py                # Grafana unified alerting payload parser
+      normaliser.py             # Converts alert formats to internal schema
 
   config/
-    dependency_map.py           # Service dependency graph for blast radius calculation
-    prometheus.yml              # Prometheus scrape config — all 6 services
+    dependency_map.py           # Service dependency graph for blast radius
+    prometheus.yml              # Prometheus scrape config
+    loki.yml                    # Loki log storage config
+    promtail.yml                # Promtail — watches logs/ and ships to Loki
     grafana/
       provisioning/
-        datasources/            # Auto-connects Grafana to Prometheus
+        datasources/            # Auto-connects Grafana to Prometheus + Loki
         dashboards/             # Pre-built SRE Agent service overview dashboard
 
-  main.py                       # CLI entry point — all user interaction
+  logs/                         # Component log files — watched by Promtail → Loki
+    collector.log
+    services.log
+    webhook.log
+    agent.log
+
+  main.py                       # Agent CLI — all user interaction
   .env.example                  # Environment variable template
   requirements.txt
 ```
@@ -282,7 +308,7 @@ pip install -r requirements.txt
 - Go to SQL Editor → paste and run `db/schema.sql`
 - Go to SQL Editor → paste and run `db/rpc_functions.sql`
 - Enable pgvector: `CREATE EXTENSION IF NOT EXISTS vector;`
-- Add memory embedding column: `ALTER TABLE agent_memory_patterns ADD COLUMN IF NOT EXISTS root_cause_embedding vector(384);`
+- Add memory embedding columns per schema.sql instructions
 
 **4. Configure environment**
 ```bash
@@ -295,34 +321,21 @@ cp .env.example .env
 python db/seed.py
 ```
 
-**6. Start Prometheus + Grafana**
+**6. Start everything with one command**
 ```bash
-docker-compose up -d
+python start.py
 ```
 
-**7. Run everything**
+This starts all components automatically:
+- Docker (Prometheus + Grafana + Loki + Promtail)
+- 6 mock microservices
+- Collector + anomaly detection
+- Webhook receiver
+- Agent CLI
 
-Open 3 terminals:
-```bash
-# Terminal 1 — mock services
-python -m services.service_runner
+**7. Set up Grafana Alert Rules** (one-time setup)
 
-# Terminal 2 — collector + anomaly detection
-python -m collector.collector
-
-# Terminal 3 — agent CLI
-python main.py
-```
-
-**8. Optional — Start webhook receiver (for Grafana alerts)**
-```bash
-# Terminal 4 — receives Grafana alerts, triggers agent automatically
-python -m api.webhook_receiver
-```
-
-**9. Set up Grafana Alert Rules**
-
-Once the webhook receiver is running, create these alert rules in Grafana (`http://localhost:3000` → Alerting → Alert rules):
+Go to `http://localhost:3000` → Alerting → Alert rules:
 
 | Rule | Query | Condition | Pending |
 |---|---|---|---|
@@ -337,8 +350,6 @@ Then create a contact point: Alerting → Notification configuration → Add con
 
 When an alert fires, Grafana POSTs to the webhook receiver which triggers the agent within 10-25 seconds — no waiting for the 60s collector poll.
 
-<img width="1281" height="469" alt="Screenshot 2026-06-11 175816" src="https://github.com/user-attachments/assets/fcf69f78-b8df-498e-816d-9f1076cddff5" />
-
 **9. Open Grafana**
 - Go to `http://localhost:3000`
 - Login: `admin` / `sreagent`
@@ -352,7 +363,7 @@ When an alert fires, Grafana POSTs to the webhook receiver which triggers the ag
 |---|---|
 | `context` | Add free-text operator context (events, outages, deployments) |
 | `contexts` | View and manage all saved context entries |
-| `status` | Live health table — shows if Prometheus and Tempo are active |
+| `status` | Live health table — Prometheus and Loki status |
 | `query` | Ask a natural language question about system health |
 | `predict` | Run load and capacity prediction |
 | `blast` | Estimate blast radius if a service fails |
@@ -360,13 +371,14 @@ When an alert fires, Grafana POSTs to the webhook receiver which triggers the ag
 | `simulate` | Trigger an incident scenario for demo |
 | `memory` | View all stored long term memory patterns |
 | `webhooks` | Show webhook receiver status and recent activity |
+| `logs` | View recent logs from all components via Loki |
 
 ---
 
 ## Simulate an Incident
 
 ```bash
-agent> simulate
+agent: simulate
 ```
 
 | Scenario | Tests |
@@ -376,7 +388,25 @@ agent> simulate
 | Black Friday 5x surge | Load prediction |
 | Gateway full outage | Alert noise reduction |
 
-After triggering, watch Grafana for the spike and Terminal 2 for the agent's full analysis.
+After triggering, watch Grafana for the spike. The agent triggers automatically via Grafana alert within 10-25 seconds.
+
+---
+
+## Viewing Logs
+
+All component logs are structured JSON shipped to Loki automatically.
+
+**From the CLI:**
+```
+agent: logs
+```
+
+**From Grafana:**
+- Go to `http://localhost:3000` → Explore
+- Select **Loki** datasource
+- Query: `{job=~"sre_.*"}` — all components
+- Query: `{component="collector"} |= "Anomaly"` — anomaly events only
+- Query: `{component="agent"} |= "RCA"` — agent decisions only
 
 ---
 
@@ -391,67 +421,60 @@ SERVICES = {
 }
 ```
 
-Update `config/prometheus.yml` targets to point to your real service `/metrics` endpoints. Everything else — anomaly detection, baselines, agent reasoning, memory — works identically on real data.
+Update `config/prometheus.yml` targets to point to your real service `/metrics` endpoints. Everything else — anomaly detection, baselines, agent reasoning, memory, logging — works identically on real data.
 
 ---
 
 ## Changelog
 
+### v3.1
+- Added Grafana Loki log aggregation — structured JSON logs from all components shipped via Promtail
+- Intelligent semantic memory retrieval — agent finds most relevant past decisions using pgvector similarity search on `agent_outputs` table, not just most recent
+- Memory now filters by mode relevance — RCA retrieves past RCAs and predictions, blast radius retrieves past blast radius runs
+- Signal embeddings stored alongside every agent output for future retrieval
+- New `logs` CLI command — queries Loki API directly, falls back to local files
+- `agent/logger.py` — structured JSON logger used by collector, webhook receiver, and agent loop
+- Single terminal startup — `python start.py` replaces running 5 separate terminals
+- All background component output redirected to `logs/` directory
+- Fixed Windows readline conflict on Ctrl+C shutdown
+- Domino prevention — cooldown registry (10 min per service) stops repeated agent triggers
+- Grafana alert rules set up — Service Down, High Error Rate, High p95 Latency, High CPU Usage
+
 ### v3.0
 - Integrated LangChain across the LLM and prompt layers
 - Replaced manual `httpx` Groq and Ollama HTTP calls with `ChatGroq` and `ChatOllama`
-- Introduced `_invoke_with_fallback(messages)` shared core — both `ask_llm` and `ask_llm_from_template` use it
-- Added `ask_llm_from_template(template, context)` for `ChatPromptTemplate`-based invocation
-- Added `ask_llm_structured(system, user, schema)` with `JsonOutputParser` for typed outputs
+- Added `ask_llm_from_template` and `ask_llm_structured` helpers
 - Added Pydantic output schemas: `RCAOutput`, `PredictionOutput`, `BlastRadiusOutput`
 - Converted all 6 reasoning mode system prompts to `ChatPromptTemplate` objects
-- All 6 mode runners in `agent_loop.py` now use `ask_llm_from_template`
-- Replaced `sentence-transformers` `SentenceTransformer` with `HuggingFaceEmbeddings` from `langchain-huggingface` — same model, same public interface
-- Removed incomplete OpenTelemetry integration
-- Fixed duplicate `_metrics_source_label()` in `context_builder.py`
-- Fixed numpy Python 3.13 wheel compatibility
-- Fixed supabase and httpx version conflict
+- Replaced `SentenceTransformer` with `HuggingFaceEmbeddings` from `langchain-huggingface`
+- Fixed numpy Python 3.13 wheel compatibility and supabase/httpx version conflict
 
 ### v2.2
-- Added Grafana webhook support — alert rules trigger the agent directly via `POST /webhook/grafana`
+- Added Grafana webhook support — alert rules trigger the agent via `POST /webhook/grafana`
 - Deduplication window (5 min per service) prevents rate limit hammering
-- Grafana parsers normalise alert payloads to internal format
-- pgvector cosine similarity for memory deduplication — similar patterns merged instead of duplicated
-- `HuggingFaceEmbeddings` replaces direct `SentenceTransformer` for memory embeddings
-- New `webhooks` CLI command shows receiver status and recent activity
-- Database client now supports both `SUPABASE_SERVICE_KEY` and `SUPABASE_ANON_KEY`
+- pgvector cosine similarity for memory deduplication
+- Database client supports both `SUPABASE_SERVICE_KEY` and `SUPABASE_ANON_KEY`
 
 ### v2.1
-- Added two-tier memory system — short term (last 48h) and long term patterns
-- Short term: recent agent decisions injected into every RCA and prediction prompt
-- Long term: structured patterns extracted after each run, stored in Supabase
-- Agent displays which past memories it drew from after every analysis
-- New `memory` CLI command shows all stored long term patterns
-- Pattern extraction uses a secondary LLM call to build structured records
-- New Supabase table: `agent_memory_patterns`
+- Two-tier memory system — short term (last 48h) and long term patterns
+- Pattern extraction after every RCA and prediction run
+- Agent displays which memories it drew from after every analysis
+- New `memory` CLI command
 
 ### v2.0
-- Added Prometheus integration — scrapes all 6 services every 15s
+- Prometheus integration — scrapes all 6 services every 15s
 - Agent uses p50/p95/p99 latency instead of averages
-- Added Grafana dashboards (request rate, latency percentiles, CPU, memory, errors)
-- Added `prometheus_adapter.py` — PromQL query layer with Supabase fallback
-- Services expose `/metrics` (Prometheus format) and `/metrics/json` (collector)
+- Grafana dashboards — request rate, latency percentiles, CPU, memory, errors
 - Fixed UUID truncation bug in alert grouping
-- Fixed Groq rate limiting — 4s delay between LLM calls
-- Agent triggers on worst anomaly only, not all 6 simultaneously
 
 ### v1.0
-- Initial release
-- 6 mock FastAPI microservices with configurable failure modes
+- Initial release — 6 mock FastAPI microservices
 - APScheduler-based metrics collector
 - Z-score + trend anomaly detection
 - Agentic loop: observe → reason → ask user → conclude
 - 6 reasoning modes: RCA, prediction, load, alerts, health query, blast radius
-- Operator context system — user feeds plain-English events
-- Supabase (PostgreSQL) for all persistence
+- Operator context system
 - Groq API (LLM) with Ollama fallback
-- Alert noise reduction (N alerts → M incidents)
-- Simulate incident CLI (4 scenarios)
 
 ---
 
@@ -460,9 +483,11 @@ Update `config/prometheus.yml` targets to point to your real service `/metrics` 
 - [x] Prometheus + Grafana observability
 - [x] Two-tier memory (short term + long term with pgvector)
 - [x] Grafana webhook integration
-- [x] LangChain integration (prompt templates, model wrappers, structured outputs)
-- [x] Grafana alert rules — near-instant detection (10-25s vs 60s collector poll)
-- [ ] Intelligent memory retrieval (LangChain VectorStore semantic search)
+- [x] LangChain integration
+- [x] Grafana alert rules — near-instant detection (10-25s)
+- [x] Semantic memory retrieval (pgvector similarity search)
+- [x] Grafana Loki log aggregation
+- [x] Single terminal startup
 - [ ] Agent decision panel in Grafana
 - [ ] Scheduled proactive analysis (not just on anomaly)
 - [ ] OpenTelemetry distributed tracing

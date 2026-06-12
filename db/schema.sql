@@ -213,21 +213,35 @@ CREATE INDEX IF NOT EXISTS idx_agent_outputs_service
 
 -- ------------------------------------------------------------
 -- 7. CONTEXT STORE
---    Pre-fed and user-answered context with optional expiry
---    This is the agent's persistent memory across sessions
+--    Free-text context provided by the user in plain English.
+--    The agent reads ALL active entries and reasons about them.
+--    No forced structure — user types whatever is relevant.
+--
+--    Examples of what users type:
+--      "There will be a power down on 3rd March"
+--      "New movie releases 9th April, expecting huge traffic"
+--      "Flash sale runs every Friday 6-9 PM"
+--      "Deployment of v3.0 tonight at 11 PM"
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS context_store (
     id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+
+    -- Auto-generated key based on timestamp — user never sees this
     key         TEXT NOT NULL UNIQUE,
+
+    -- Raw free-text exactly as the user typed it
     value       TEXT NOT NULL,
+
     source      TEXT NOT NULL CHECK (source IN ('user_provided', 'agent_question', 'system')),
     added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at  TIMESTAMPTZ,    -- NULL = never expires
+
+    -- NULL = never expires. Agent decides relevance, not expiry.
+    expires_at  TIMESTAMPTZ,
     is_active   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE INDEX IF NOT EXISTS idx_context_store_active
-    ON context_store (is_active, expires_at)
+    ON context_store (is_active, added_at DESC)
     WHERE is_active = TRUE;
 
 
@@ -291,3 +305,82 @@ SELECT DISTINCT ON (service_name)
     status_code
 FROM metrics_raw
 ORDER BY service_name, timestamp DESC;
+
+
+-- ------------------------------------------------------------
+-- 10. AGENT MEMORY PATTERNS (long-term structured memory)
+--    One row per recognised failure pattern per service.
+--    Updated/merged after each agent run.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_memory_patterns (
+    id                      UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    service_name            TEXT NOT NULL,
+
+    -- What kind of pattern this is
+    pattern_type            TEXT NOT NULL,
+    -- e.g. "response_time_spike", "error_rate_surge",
+    --      "gradual_degradation", "cascade_failure", "traffic_surge"
+
+    -- When this pattern tends to occur
+    time_of_day             TEXT,   -- "morning", "afternoon", "evening", "overnight"
+    day_of_week             TEXT,   -- "weekday", "weekend", "friday", or NULL if any
+
+    -- What the agent concluded
+    root_cause              TEXT NOT NULL,
+    resolution              TEXT,   -- what fixed it last time
+    resolution_time_mins    INT,    -- how long it took to resolve
+
+    -- How reliable this pattern is
+    occurrence_count        INT NOT NULL DEFAULT 1,
+    prediction_correct_count INT NOT NULL DEFAULT 0,
+    prediction_total_count  INT NOT NULL DEFAULT 0,
+
+    -- Outcome of last prediction
+    last_outcome            TEXT,   -- "correct", "incorrect", "unknown"
+    last_seen               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    first_seen              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Plain text summary for LLM injection
+    raw_summary             TEXT NOT NULL,
+
+    -- Link to the agent output that created/updated this
+    source_output_id        UUID REFERENCES agent_outputs(id),
+
+    UNIQUE (service_name, pattern_type, time_of_day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_patterns_service
+    ON agent_memory_patterns (service_name, last_seen DESC);
+
+
+-- ------------------------------------------------------------
+-- 11. AGENT MEMORY RETRIEVALS (audit log)
+--    Records exactly which memories were used in each agent run.
+--    This is what gets displayed to the user — "memories explored".
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_memory_retrievals (
+    id                  UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    agent_output_id     UUID REFERENCES agent_outputs(id),
+    retrieved_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    memory_type         TEXT NOT NULL,  -- "short_term" | "long_term"
+    service_name        TEXT,
+    memory_summary      TEXT NOT NULL,  -- what was retrieved
+    relevance_reason    TEXT            -- why this memory was selected
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_retrievals_output
+    ON agent_memory_retrievals (agent_output_id);
+
+-- ------------------------------------------------------------
+-- 10. VECTOR SEARCH ON AGENT OUTPUTS
+--     Adds semantic search capability to agent_outputs.
+--     Run this after enabling pgvector extension.
+-- ------------------------------------------------------------
+ALTER TABLE agent_outputs
+ADD COLUMN IF NOT EXISTS signal_embedding vector(384),
+ADD COLUMN IF NOT EXISTS signal_text TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_agent_outputs_embedding
+ON agent_outputs
+USING ivfflat (signal_embedding vector_cosine_ops)
+WITH (lists = 10);

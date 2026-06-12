@@ -29,8 +29,32 @@ services:
       - ./config/grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - prometheus
+      - loki
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: sre_loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config/loki.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: sre_promtail
+    volumes:
+      - ./config/promtail.yml:/etc/promtail/config.yml
+      - ./logs:/var/log/sre-agent
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
     restart: unless-stopped
 
 volumes:
   prometheus_data:
   grafana_data:
+  loki_data:

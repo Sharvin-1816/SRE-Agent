@@ -118,3 +118,45 @@ AS $$
     GROUP BY service_name
     ORDER BY avg_response_time DESC;
 $$;
+
+
+-- match_agent_outputs
+-- Semantic similarity search over agent_outputs using pgvector.
+-- Finds past agent decisions most similar to the current anomaly signal.
+-- Used by the intelligent memory retrieval system.
+CREATE OR REPLACE FUNCTION match_agent_outputs(
+    p_service    TEXT,
+    p_embedding  vector(384),
+    p_mode       TEXT DEFAULT NULL,
+    p_threshold  FLOAT DEFAULT 0.70,
+    p_limit      INT   DEFAULT 5
+)
+RETURNS TABLE (
+    id              UUID,
+    service_name    TEXT,
+    mode            TEXT,
+    confidence      INT,
+    signal_text     TEXT,
+    rca             JSONB,
+    prediction      JSONB,
+    blast_radius    JSONB,
+    fix_suggestions JSONB,
+    generated_at    TIMESTAMPTZ,
+    similarity      FLOAT
+)
+LANGUAGE sql STABLE
+AS $$
+    SELECT
+        id, service_name, mode, confidence,
+        signal_text, rca, prediction, blast_radius,
+        fix_suggestions, generated_at,
+        1 - (signal_embedding <=> p_embedding) AS similarity
+    FROM agent_outputs
+    WHERE
+        service_name = p_service
+        AND signal_embedding IS NOT NULL
+        AND (p_mode IS NULL OR mode = p_mode)
+        AND 1 - (signal_embedding <=> p_embedding) >= p_threshold
+    ORDER BY signal_embedding <=> p_embedding
+    LIMIT p_limit;
+$$;

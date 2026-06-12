@@ -1,9 +1,8 @@
 """
 agent/embeddings.py
 
-Vector embeddings via LangChain HuggingFaceEmbeddings.
-Model: all-MiniLM-L6-v2 (384-dim, ~80MB, cached after first use).
-Public interface (embed, similarity, is_similar) is unchanged.
+Generates vector embeddings using HuggingFaceEmbeddings from langchain-huggingface.
+Model: all-MiniLM-L6-v2 (384 dimensions, runs locally, no API calls)
 """
 
 import numpy as np
@@ -11,36 +10,48 @@ from rich.console import Console
 
 console = Console()
 
-_embeddings = None
+_model = None
 
 
-def _get_embeddings():
-    global _embeddings
-    if _embeddings is None:
+def _get_model():
+    global _model
+    if _model is None:
         try:
             from langchain_huggingface import HuggingFaceEmbeddings
             console.print("[dim]  Loading embedding model (first run only)...[/dim]")
-            _embeddings = HuggingFaceEmbeddings(
+            _model = HuggingFaceEmbeddings(
                 model_name="all-MiniLM-L6-v2",
                 model_kwargs={"device": "cpu"},
                 encode_kwargs={"normalize_embeddings": True},
             )
             console.print("[dim]  Embedding model ready.[/dim]")
         except ImportError:
-            raise RuntimeError(
-                "langchain-huggingface not installed.\n"
-                "Run: pip install langchain-huggingface"
-            )
-    return _embeddings
+            # Fall back to sentence-transformers directly
+            try:
+                from sentence_transformers import SentenceTransformer
+                console.print("[dim]  Loading embedding model (first run only)...[/dim]")
+                _model = SentenceTransformer("all-MiniLM-L6-v2")
+                _model._is_sentence_transformer = True
+                console.print("[dim]  Embedding model ready.[/dim]")
+            except ImportError:
+                raise RuntimeError(
+                    "No embedding library found.\n"
+                    "Run: pip install langchain-huggingface"
+                )
+    return _model
 
 
 def embed(text: str) -> list[float]:
-    """Convert text to a 384-dimensional vector."""
-    return _get_embeddings().embed_query(text)
+    model = _get_model()
+    # Handle both HuggingFaceEmbeddings and SentenceTransformer
+    if hasattr(model, "_is_sentence_transformer"):
+        vector = model.encode(text, normalize_embeddings=True)
+        return vector.tolist()
+    else:
+        return model.embed_query(text)
 
 
 def similarity(vec1: list[float], vec2: list[float]) -> float:
-    """Cosine similarity — normalised vectors so dot product == cosine similarity."""
     a = np.array(vec1)
     b = np.array(vec2)
     return float(np.dot(a, b))

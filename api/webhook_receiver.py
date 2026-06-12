@@ -44,8 +44,10 @@ load_dotenv()
 from api.parsers.grafana   import parse as parse_grafana
 from api.parsers.normaliser import make_internal_alert
 from db.database            import insert_alert, insert_anomaly
+from agent.logger           import get_logger as _get_logger
 
 console = Console()
+_log = _get_logger("webhook")
 
 app = FastAPI(title="SRE Agent Webhook Receiver")
 
@@ -127,6 +129,15 @@ def _process_alerts(alerts: list[dict], source: str) -> dict:
         f"severity: {worst['severity']}"
     )
     console.print(f"  {worst['summary']}")
+
+    _log.info(
+        "Webhook received",
+        source=source,
+        service=service_name,
+        severity=worst["severity"],
+        alert_count=len(alerts),
+        summary=worst["summary"][:200],
+    )
 
     should_trigger, reason = _should_trigger_agent(service_name)
 

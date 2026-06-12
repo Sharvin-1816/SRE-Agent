@@ -106,10 +106,9 @@ def cmd_view_contexts():
     console.print(table)
 
     # Offer delete
-    delete = Prompt.ask(
-        "\nDelete an entry? Enter number or press Enter to skip",
-        default=""
-    )
+    sys.stdout.write("\nDelete an entry? Enter number or press Enter to skip: ")
+    sys.stdout.flush()
+    delete = input().strip()
     if delete.isdigit():
         idx = int(delete) - 1
         if 0 <= idx < len(entries):
@@ -122,7 +121,9 @@ def cmd_health_query():
     console.print("[dim]Examples: 'Which services were unstable this weekend?'[/dim]")
     console.print("[dim]          'What failed yesterday?'[/dim]")
     console.print("[dim]          'Show me last 24 hours'[/dim]\n")
-    question = Prompt.ask("[bold cyan]Your question[/bold cyan]")
+    sys.stdout.write("Your question: ")
+    sys.stdout.flush()
+    question = input()
     if question.strip():
         run_health_query(question)
 
@@ -130,10 +131,9 @@ def cmd_health_query():
 def cmd_load_prediction():
     """Load prediction — all services or specific one."""
     console.print(f"[dim]Services: {', '.join(SERVICES)}[/dim]")
-    svc = Prompt.ask(
-        "Service name (or press Enter for all services)",
-        default=""
-    )
+    sys.stdout.write("Service name (or press Enter for all services): ")
+    sys.stdout.flush()
+    svc = input()
     service = svc.strip() if svc.strip() in SERVICES else None
     if svc.strip() and not service:
         console.print(f"[yellow]  Unknown service '{svc}'. Running for all services.[/yellow]")
@@ -143,7 +143,9 @@ def cmd_load_prediction():
 def cmd_blast_radius():
     """Blast radius for a specific service."""
     console.print(f"[dim]Services: {', '.join(SERVICES)}[/dim]")
-    svc = Prompt.ask("[bold]Which service is failing[/bold]")
+    sys.stdout.write("Which service is failing: ")
+    sys.stdout.flush()
+    svc = input()
     if svc.strip() in SERVICES:
         run_blast_radius(svc.strip())
     else:
@@ -227,7 +229,19 @@ def cmd_status():
     except Exception:
         console.print("  [yellow]Data source: Supabase[/yellow]")
 
-    rows = get_latest_metric_per_service()
+    # OTel / Tempo status
+    try:
+        from agent.trace_adapter import is_available as tempo_ok
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            running = tempo_ok()
+        if running:
+            console.print("  [cyan]Tracing: Grafana Tempo active (distributed traces available)[/cyan]")
+        else:
+            console.print("  [dim]Tracing: Grafana Tempo offline (run docker-compose up -d tempo)[/dim]")
+    except Exception:
+        pass
     if not rows:
         console.print("[yellow]  No metrics yet. Is the collector running?[/yellow]")
         return
@@ -319,6 +333,7 @@ def cmd_help():
         "[bold cyan]simulate[/bold cyan]  — Trigger an incident scenario for demo\n"
         "[bold cyan]memory[/bold cyan]    — View all stored long term memory patterns\n"
         "[bold cyan]webhooks[/bold cyan]  — Show webhook receiver status and recent activity\n"
+        "[bold cyan]logs[/bold cyan]      — View recent logs from all components\n"
         "[bold cyan]help[/bold cyan]      — Show this menu\n"
         "[bold cyan]exit[/bold cyan]      — Quit",
         title="[bold]Available Commands[/bold]",
@@ -327,6 +342,76 @@ def cmd_help():
 
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
+
+def cmd_logs():
+    """View recent logs from all components via Loki or local files."""
+    try:
+        import httpx
+        # Try Loki first
+        resp = httpx.get(
+            "http://localhost:3100/loki/api/v1/query_range",
+            params={
+                "query": '{job=~"sre_.*"}',
+                "limit": 50,
+                "start": str(int((__import__("time").time() - 3600) * 1e9)),
+                "end":   str(int(__import__("time").time() * 1e9)),
+            },
+            timeout=3.0,
+        )
+        if resp.status_code == 200:
+            data   = resp.json()
+            result = data.get("data", {}).get("result", [])
+            entries = []
+            for stream in result:
+                component = stream.get("stream", {}).get("component", "unknown")
+                for ts, line in stream.get("values", []):
+                    try:
+                        import json as _json
+                        entry = _json.loads(line)
+                        entries.append((ts, component, entry))
+                    except Exception:
+                        entries.append((ts, component, {"message": line, "level": "info"}))
+
+            entries.sort(key=lambda x: x[0], reverse=True)
+
+            from rich.table import Table
+            table = Table(title="Recent Logs (via Loki)", show_lines=False)
+            table.add_column("Time",      width=10, style="dim")
+            table.add_column("Component", width=12, style="cyan")
+            table.add_column("Level",     width=8)
+            table.add_column("Message")
+
+            for _, component, entry in entries[:30]:
+                ts_str  = entry.get("timestamp", "")[:16]
+                level   = entry.get("level", "info")
+                message = entry.get("message", "")
+                level_style = {
+                    "error":   "[red]error[/red]",
+                    "warning": "[yellow]warn[/yellow]",
+                    "info":    "[green]info[/green]",
+                    "debug":   "[dim]debug[/dim]",
+                }.get(level, level)
+                table.add_row(ts_str, component, level_style, message)
+
+            console.print(table)
+            console.print("[dim]  Full logs: http://localhost:3000 → Explore → Loki[/dim]")
+            return
+    except Exception:
+        pass
+
+    # Fall back to local log files
+    console.print("[yellow]  Loki not available — showing local log files[/yellow]")
+    log_dir = __import__("pathlib").Path("logs")
+    if not log_dir.exists():
+        console.print("[dim]  No logs directory found.[/dim]")
+        return
+    for f in sorted(log_dir.glob("*.log")):
+        lines = f.read_text(encoding="utf-8", errors="replace").strip().split("\n")
+        last  = lines[-10:] if len(lines) > 10 else lines
+        console.print(f"\n[cyan]{f.name}[/cyan] (last {len(last)} lines):")
+        for line in last:
+            console.print(f"  [dim]{line[:120]}[/dim]")
+
 
 def cmd_simulate():
     """Launch the incident simulator."""
@@ -345,6 +430,7 @@ COMMANDS = {
     "simulate":  cmd_simulate,
     "memory":    cmd_view_memory,
     "webhooks":  cmd_webhooks,
+    "logs":      cmd_logs,
     "help":      cmd_help,
 }
 
@@ -353,14 +439,13 @@ def main():
     console.rule("[bold cyan]SRE Agent — Operational Intelligence[/bold cyan]")
     console.print(
         "Agent ready. Type [bold cyan]help[/bold cyan] for commands.\n"
-        "[dim]Tip: Start by running 'python -m services.service_runner' and "
-        "'python -m collector.collector' in separate terminals.[/dim]\n"
-        "[dim]Decisions API: run 'python -m api.decisions_api' in a separate terminal.[/dim]\n"
     )
 
     while True:
         try:
-            cmd = Prompt.ask("\n[bold cyan]agent[/bold cyan]").strip().lower()
+            sys.stdout.write("\nagent: ")
+            sys.stdout.flush()
+            cmd = input().strip().lower()
 
             if cmd in ("exit", "quit", "q"):
                 console.print("[yellow]Goodbye.[/yellow]")
@@ -374,6 +459,8 @@ def main():
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Goodbye.[/yellow]")
+            break
+        except EOFError:
             break
         except Exception as e:
             console.print(f"[bold red]  Error: {e}[/bold red]")

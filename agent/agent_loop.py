@@ -27,12 +27,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent.llm_adapter import ask_llm, ask_llm_from_template, parse_json_response
+from agent.llm_adapter import ask_llm, parse_json_response
 from agent.prompts import (
-    RCA_PROMPT, PREDICT_PROMPT, LOAD_PROMPT,
-    ALERT_GROUPING_PROMPT, HEALTH_QUERY_PROMPT, BLAST_RADIUS_PROMPT,
     RCA_SYSTEM, PREDICT_SYSTEM, LOAD_SYSTEM,
-    ALERT_GROUPING_SYSTEM, HEALTH_QUERY_SYSTEM, BLAST_RADIUS_SYSTEM,
+    ALERT_GROUPING_SYSTEM, HEALTH_QUERY_SYSTEM, BLAST_RADIUS_SYSTEM
 )
 from agent.context_builder import (
     build_for_rca, build_for_prediction, build_for_load_prediction,
@@ -40,8 +38,9 @@ from agent.context_builder import (
 )
 from agent.memory import (
     build_memory_context, display_used_memories,
-    extract_and_store_pattern,
+    extract_and_store_pattern, build_signal_text, store_signal_embedding,
 )
+from agent.logger import get_logger as _get_logger
 from db.database import (
     insert_agent_output, get_ungrouped_alerts,
     mark_alerts_grouped, insert_incident, add_user_context
@@ -49,6 +48,7 @@ from db.database import (
 
 console = Console()
 CONFIDENCE_THRESHOLD = int(os.getenv("AGENT_CONFIDENCE_THRESHOLD", "75"))
+_log = _get_logger("agent")
 
 
 def _get_time_of_day(hour: int) -> str:
@@ -188,10 +188,10 @@ def _display_blast_radius(result: dict):
 
 # ── Context gap handler ───────────────────────────────────────────────────────
 
-def _handle_context_gap(result: dict, prompt_template, user_prompt: str) -> dict:
+def _handle_context_gap(result: dict, system_prompt: str, user_prompt: str) -> dict:
     """
     If LLM confidence is low, ask the user for more context via CLI.
-    Save the answer to the context store and re-run with the updated prompt.
+    Save the answer to the context store and re-run.
     """
     question = result.get("context_question", "Do you have any additional context?")
 
@@ -205,12 +205,17 @@ def _handle_context_gap(result: dict, prompt_template, user_prompt: str) -> dict
     answer = Prompt.ask("[bold yellow]Your answer[/bold yellow]")
 
     if answer.strip():
+        # Save to context store so it's available for all future reasoning
         add_user_context(answer, source="agent_question")
         console.print("[green]  ✓ Context saved. Re-running analysis...[/green]\n")
 
+        # Rebuild user prompt with updated context (re-import to get fresh context)
+        from db.database import get_context_as_text
+        updated_ctx = get_context_as_text()
         updated_prompt = user_prompt + f"\n\nADDITIONAL CONTEXT FROM USER:\n{answer}"
-        raw    = ask_llm_from_template(prompt_template, updated_prompt)
-        result = parse_json_response(raw)
+
+        raw     = ask_llm(system_prompt, updated_prompt)
+        result  = parse_json_response(raw)
 
     return result
 
@@ -220,28 +225,39 @@ def _handle_context_gap(result: dict, prompt_template, user_prompt: str) -> dict
 def run_rca(service_name: str, signal: dict) -> dict:
     console.print(f"\n[bold]Running RCA for {service_name}...[/bold]")
 
-    # Build memory context
     now         = datetime.now(timezone.utc)
     time_of_day = _get_time_of_day(now.hour)
     day_of_week = now.strftime("%A")
-    memory_text, used_memories = build_memory_context(service_name, time_of_day)
+
+    # Intelligent semantic memory retrieval
+    memory_text, used_memories, retrieval_method = build_memory_context(
+        service_name=service_name,
+        signal=signal,
+        mode="rca",
+        time_of_day=time_of_day,
+    )
+    console.print(f"  [dim]Memory: {retrieval_method}[/dim]")
 
     pkg, prompt = build_for_rca(service_name, signal)
-
-    # Inject memory into prompt
     prompt = prompt + memory_text
 
-    raw    = ask_llm_from_template(RCA_PROMPT, prompt)
+    raw    = ask_llm(RCA_SYSTEM, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, RCA_PROMPT, prompt)
+        result = _handle_context_gap(result, RCA_SYSTEM, prompt)
 
     _display_rca(result, service_name)
-
-    # Display which memories were used
     display_used_memories(used_memories, service_name)
+    _log.info(
+        "RCA completed",
+        service=service_name,
+        confidence=result.get("confidence"),
+        root_cause=result.get("root_cause", "")[:200],
+        memory_method=retrieval_method,
+    )
 
+    result["mode"] = "rca"
     saved = insert_agent_output({
         "context_package_id":  pkg["id"],
         "mode":                "rca",
@@ -253,10 +269,13 @@ def run_rca(service_name: str, signal: dict) -> dict:
         "raw_llm_response":    raw,
     })
 
-    # Extract and store pattern for future memory
-    result["mode"] = "rca"
-    extract_and_store_pattern(result, service_name, time_of_day, day_of_week)
+    # Store signal embedding for future semantic retrieval
+    if saved and saved.get("id"):
+        from agent.memory import build_signal_text, store_signal_embedding
+        signal_text = build_signal_text(service_name, signal, "rca")
+        store_signal_embedding(saved["id"], signal_text)
 
+    extract_and_store_pattern(result, service_name, time_of_day, day_of_week)
     return result
 
 
@@ -266,21 +285,30 @@ def run_prediction(service_name: str, signal: dict) -> dict:
     now         = datetime.now(timezone.utc)
     time_of_day = _get_time_of_day(now.hour)
     day_of_week = now.strftime("%A")
-    memory_text, used_memories = build_memory_context(service_name, time_of_day)
+
+    # Intelligent semantic memory retrieval
+    memory_text, used_memories, retrieval_method = build_memory_context(
+        service_name=service_name,
+        signal=signal,
+        mode="predict_degradation",
+        time_of_day=time_of_day,
+    )
+    console.print(f"  [dim]Memory: {retrieval_method}[/dim]")
 
     pkg, prompt = build_for_prediction(service_name, signal)
     prompt = prompt + memory_text
 
-    raw    = ask_llm_from_template(PREDICT_PROMPT, prompt)
+    raw    = ask_llm(PREDICT_SYSTEM, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, PREDICT_PROMPT, prompt)
+        result = _handle_context_gap(result, PREDICT_SYSTEM, prompt)
 
     _display_prediction(result, service_name)
     display_used_memories(used_memories, service_name)
 
-    insert_agent_output({
+    result["mode"] = "predict_degradation"
+    saved = insert_agent_output({
         "context_package_id":  pkg["id"],
         "mode":                "predict_degradation",
         "service_name":        service_name,
@@ -291,9 +319,13 @@ def run_prediction(service_name: str, signal: dict) -> dict:
         "raw_llm_response":    raw,
     })
 
-    result["mode"] = "predict_degradation"
-    extract_and_store_pattern(result, service_name, time_of_day, day_of_week)
+    # Store signal embedding for future semantic retrieval
+    if saved and saved.get("id"):
+        from agent.memory import build_signal_text, store_signal_embedding
+        signal_text = build_signal_text(service_name, signal, "predict_degradation")
+        store_signal_embedding(saved["id"], signal_text)
 
+    extract_and_store_pattern(result, service_name, time_of_day, day_of_week)
     return result
 
 
@@ -301,11 +333,11 @@ def run_load_prediction(service_name: str = None) -> dict:
     console.print("\n[bold]📊 Running load prediction...[/bold]")
     pkg, prompt = build_for_load_prediction(service_name)
 
-    raw    = ask_llm_from_template(LOAD_PROMPT, prompt)
+    raw    = ask_llm(LOAD_SYSTEM, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, LOAD_PROMPT, prompt)
+        result = _handle_context_gap(result, LOAD_SYSTEM, prompt)
 
     _display_load(result)
 
@@ -335,11 +367,11 @@ def run_alert_grouping() -> dict:
     # Retrieve the short→full UUID map attached by context_builder
     id_map = pkg.pop("_id_map", {})
 
-    raw    = ask_llm_from_template(ALERT_GROUPING_PROMPT, prompt)
+    raw    = ask_llm(ALERT_GROUPING_SYSTEM, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, ALERT_GROUPING_PROMPT, prompt)
+        result = _handle_context_gap(result, ALERT_GROUPING_SYSTEM, prompt)
 
     _display_alert_grouping(result)
 
@@ -374,11 +406,11 @@ def run_health_query(question: str) -> dict:
     console.print(f"\n[bold]💬 Health query: {question}[/bold]")
     pkg, prompt = build_for_health_query(question)
 
-    raw    = ask_llm_from_template(HEALTH_QUERY_PROMPT, prompt)
+    raw    = ask_llm(HEALTH_QUERY_SYSTEM, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, HEALTH_QUERY_PROMPT, prompt)
+        result = _handle_context_gap(result, HEALTH_QUERY_SYSTEM, prompt)
 
     _display_health_query(result, question)
 
@@ -394,18 +426,36 @@ def run_health_query(question: str) -> dict:
 
 
 def run_blast_radius(service_name: str, signal: dict = None) -> dict:
-    console.print(f"\n[bold]💥 Running blast radius for {service_name}...[/bold]")
-    pkg, prompt = build_for_blast_radius(service_name, signal)
+    console.print(f"\n[bold]Running blast radius for {service_name}...[/bold]")
 
-    raw    = ask_llm_from_template(BLAST_RADIUS_PROMPT, prompt)
+    now         = datetime.now(timezone.utc)
+    time_of_day = _get_time_of_day(now.hour)
+
+    # Use empty signal if none provided
+    _signal = signal or {}
+
+    # Intelligent semantic memory retrieval
+    memory_text, used_memories, retrieval_method = build_memory_context(
+        service_name=service_name,
+        signal=_signal,
+        mode="blast_radius",
+        time_of_day=time_of_day,
+    )
+    console.print(f"  [dim]Memory: {retrieval_method}[/dim]")
+
+    pkg, prompt = build_for_blast_radius(service_name, signal)
+    prompt = prompt + memory_text
+
+    raw    = ask_llm(BLAST_RADIUS_SYSTEM, prompt)
     result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
-        result = _handle_context_gap(result, BLAST_RADIUS_PROMPT, prompt)
+        result = _handle_context_gap(result, BLAST_RADIUS_SYSTEM, prompt)
 
     _display_blast_radius(result)
+    display_used_memories(used_memories, service_name)
 
-    insert_agent_output({
+    saved = insert_agent_output({
         "context_package_id":  pkg["id"],
         "mode":                "blast_radius",
         "service_name":        service_name,
@@ -415,6 +465,12 @@ def run_blast_radius(service_name: str, signal: dict = None) -> dict:
         "fix_suggestions":     result.get("fix_suggestions", []),
         "raw_llm_response":    raw,
     })
+
+    # Store signal embedding for future semantic retrieval
+    if saved and saved.get("id"):
+        signal_text = build_signal_text(service_name, _signal, "blast_radius")
+        store_signal_embedding(saved["id"], signal_text)
+
     return result
 
 

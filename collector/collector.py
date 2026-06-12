@@ -49,6 +49,8 @@ from db.database import (
 )
 from collector.anomaly_detector import check_for_anomalies
 
+from agent.logger import get_logger as _get_logger
+_log = _get_logger("collector")
 console = Console()
 
 # ── Service registry ──────────────────────────────────────────────────────────
@@ -337,9 +339,17 @@ def poll_all_services():
             if signal:
                 score = _compute_anomaly_score(signal)
                 console.print(f"  [dim]Anomaly detected: {service_name} score={score}[/dim]")
+                _log.info(
+                    "Anomaly detected",
+                    service=service_name,
+                    score=score,
+                    severity=signal.get("severity", "unknown"),
+                    summary=signal.get("human_summary", "")[:200],
+                )
                 anomalies.append((service_name, signal, score))
         except Exception as e:
             console.print(f"[yellow]  Anomaly check error for {service_name}: {e}[/yellow]")
+            _log.error("Anomaly check failed", service=service_name, error=str(e))
 
         results.append((service_name, row))
 
@@ -384,6 +394,13 @@ def poll_all_services():
             f"({'DOWN' if is_down else reason})[/bold red]"
         )
         _record_trigger(service_name, score)
+        _log.info(
+            "Agent triggered",
+            service=service_name,
+            score=score,
+            reason=reason,
+            trigger="anomaly_detected",
+        )
 
         try:
             from agent.agent_loop import run_agent
