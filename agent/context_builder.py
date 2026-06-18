@@ -19,7 +19,6 @@ from db.database import (
     get_outputs_for_health_query
 )
 from config.dependency_map import get_dependency_summary, SERVICE_DESCRIPTIONS
-from agent.memory import build_memory_context
 
 console = Console()
 
@@ -188,15 +187,21 @@ def _parse_time_range_from_query(question: str) -> tuple[str, str]:
 
 # ── Main builders ─────────────────────────────────────────────────────────────
 
-def build_for_rca(service_name: str, signal: dict) -> tuple[dict, str, list]:
-    """Build context package and prompt text for RCA mode."""
+def build_for_rca(service_name: str, signal: dict) -> tuple[dict, str]:
+    """
+    Build context package and prompt text for RCA mode.
+
+    Note: this function does NOT inject memory into the prompt. That is
+    handled by run_rca() in agent_loop.py, which calls build_memory_context()
+    itself (with the required `mode` argument) and appends the result to
+    the prompt this function returns. Doing it here too used to cause a
+    duplicate memory block plus a crash, since this call was never updated
+    when build_memory_context() gained its `mode` parameter.
+    """
     dt       = _build_datetime_context()
     ctx_text = get_context_as_text()
     metrics  = _format_recent_metrics(service_name)
     alerts   = _format_alerts(get_ungrouped_alerts(window_minutes=10))
-
-    # Build memory context
-    memory_block, retrievals = build_memory_context(service_name, dt["time_of_day"])
 
     package = {
         "trigger_reason": "anomaly_detected",
@@ -233,7 +238,6 @@ ACTIVE ALERTS:
 
 CURRENT TIME CONTEXT:
 {dt['day_of_week']}, {dt['date']} at {dt['time']} — {dt['time_of_day']}
-{memory_block}
 
 OPERATOR CONTEXT (provided by user — treat as ground truth):
 ─────────────────────────────────────────────────────────────
@@ -244,17 +248,20 @@ Use the agent memory above to inform your analysis.
 If a past pattern matches, reference it explicitly in your root_cause.
 Perform root cause analysis. Return JSON only.
 """
-    return saved, prompt, retrievals
+    return saved, prompt
 
 
-def build_for_prediction(service_name: str, signal: dict) -> tuple[dict, str, list]:
-    """Build context package and prompt text for degradation prediction."""
+def build_for_prediction(service_name: str, signal: dict) -> tuple[dict, str]:
+    """
+    Build context package and prompt text for degradation prediction.
+
+    Same note as build_for_rca: memory is injected by run_prediction() in
+    agent_loop.py, not here. This function no longer calls
+    build_memory_context() — see build_for_rca's docstring for why.
+    """
     dt       = _build_datetime_context()
     ctx_text = get_context_as_text()
     metrics  = _format_recent_metrics(service_name)
-
-    # Build memory context
-    memory_block, retrievals = build_memory_context(service_name, dt["time_of_day"])
 
     package = {
         "trigger_reason": "anomaly_detected",
@@ -280,7 +287,6 @@ RECENT METRICS (last 30 min, showing trajectory):
 CURRENT TIME CONTEXT:
 {dt['day_of_week']}, {dt['date']} at {dt['time']} — {dt['time_of_day']}
 Days until weekend: {dt['days_to_weekend']}
-{memory_block}
 
 OPERATOR CONTEXT (provided by user — treat as ground truth):
 ─────────────────────────────────────────────────────────────
@@ -293,7 +299,7 @@ your confidence and time-to-failure estimate.
 
 Predict degradation trajectory. Return JSON only.
 """
-    return saved, prompt, retrievals
+    return saved, prompt
 
 
 def build_for_load_prediction(service_name: str = None) -> tuple[dict, str]:

@@ -24,6 +24,33 @@ Stop everything: Ctrl+C
 
 import os
 import sys
+
+# MUST run before any other import in this process — several modules
+# (collector/anomaly_detector.py, agent/agent_loop.py, main.py, etc.)
+# print Unicode characters like ⚠ 📡 🤔 ✓ 📈 via Rich. On Windows, the
+# default console encoding is cp1252 (a legacy codepage), which cannot
+# represent most of those characters at all and raises
+# UnicodeEncodeError the moment one is printed.
+#
+# This was silently killing more than just the print statement: when
+# the crash happened inside collector.py's poll_all_services() (which
+# runs as a scheduled APScheduler job, not in a try/except around every
+# individual print), the UnicodeEncodeError propagated all the way up
+# and made the ENTIRE scheduled poll job raise — meaning anomaly
+# detection stopped running from that point in the session onward,
+# disguised as a cosmetic console-encoding error.
+#
+# reconfigure(encoding="utf-8") forces stdout/stderr to UTF-8 regardless
+# of the OS's default codepage, for THIS process and every thread it
+# spawns (services, collector, webhook receiver, agent CLI all run as
+# threads inside this one process — see _run_services/_run_collector/
+# _run_webhook below). Available on Python 3.7+; safe no-op on
+# platforms where the default is already UTF-8 (e.g. most Linux/macOS).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import time
 import signal
 import threading
@@ -48,19 +75,27 @@ def _log_path(name: str) -> Path:
 # ── Component runners ─────────────────────────────────────────────────────────
 
 def _run_services(stop_event: threading.Event):
-    """Run all 6 mock FastAPI services in background."""
-    log = open(_log_path("services"), "a", buffering=1)
+    """
+    Run the unified mock services app in background.
+
+    Was: services.service_runner.start_all() — 6 threads, 6 uvicorn
+    servers, 6 ports (3001-3006).
+    Now: services.app — ONE process, ONE port (default 8000), all 6
+    services mounted under path prefixes (/payment, /cart, etc). See
+    services/app.py's module docstring for the full rationale (Railway
+    compatibility — one service maps to one port there).
+    """
+    log = open(_log_path("services"), "a", buffering=1, encoding="utf-8")
     log.write(f"\n--- Started {datetime.now()} ---\n")
     log.flush()
 
     try:
         from rich.console import Console as RichConsole
-        import services.service_runner as svc_module
+        import services.app as svc_module
 
         svc_module.console = RichConsole(file=log, highlight=False, width=120)
 
-        from services.service_runner import start_all
-        start_all()
+        svc_module.main()
     except Exception as e:
         log.write(f"ERROR: {e}\n")
         log.flush()
@@ -72,7 +107,7 @@ def _run_collector(stop_event: threading.Event):
     """Run the collector + anomaly detector in background."""
     time.sleep(5)
 
-    log = open(_log_path("collector"), "a", buffering=1)
+    log = open(_log_path("collector"), "a", buffering=1, encoding="utf-8")
     log.write(f"\n--- Started {datetime.now()} ---\n")
     log.flush()
 
@@ -112,7 +147,7 @@ def _run_webhook(stop_event: threading.Event):
     """Run the Grafana webhook receiver in background."""
     time.sleep(3)
 
-    log = open(_log_path("webhook"), "a")
+    log = open(_log_path("webhook"), "a", buffering=1, encoding="utf-8")
     log.write(f"\n--- Started {datetime.now()} ---\n")
     log.flush()
 
@@ -158,12 +193,13 @@ def _start_docker(skip: bool):
 # ── Status display ────────────────────────────────────────────────────────────
 
 def _wait_for_services(timeout: int = 15) -> bool:
-    """Wait until at least one service is reachable."""
+    """Wait until the unified services app is reachable."""
     import httpx
+    base_url = os.getenv("MOCK_SERVICES_BASE_URL", "http://localhost:8000")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            r = httpx.get("http://localhost:3001/health", timeout=1.0)
+            r = httpx.get(f"{base_url}/payment/health", timeout=1.0)
             if r.status_code == 200:
                 return True
         except Exception:
@@ -184,10 +220,11 @@ def _print_status(webhook: bool):
     table.add_column("Where",      width=30)
     table.add_column("Log file",   style="dim")
 
-    # Check services
+    # Check services (unified app — one port now, not 3001-3006)
     try:
         import httpx
-        r = httpx.get("http://localhost:3001/health", timeout=1.0)
+        base_url = os.getenv("MOCK_SERVICES_BASE_URL", "http://localhost:8000")
+        r = httpx.get(f"{base_url}/payment/health", timeout=1.0)
         svc_status = "[green]UP[/green]" if r.status_code == 200 else "[red]DOWN[/red]"
     except Exception:
         svc_status = "[yellow]starting...[/yellow]"
@@ -211,7 +248,8 @@ def _print_status(webhook: bool):
     else:
         wh_status = "[dim]disabled[/dim]"
 
-    table.add_row("Mock services (x6)",  svc_status,  "localhost:3001-3006",     "logs/services.log")
+    base_url_display = os.getenv("MOCK_SERVICES_BASE_URL", "http://localhost:8000")
+    table.add_row("Mock services (x6)",  svc_status,  base_url_display,           "logs/services.log")
     table.add_row("Collector",           "[green]UP[/green]", "background thread", "logs/collector.log")
     table.add_row("Prometheus",          prom_status, "localhost:9090",           "docker logs")
     table.add_row("Grafana",             "[dim]check browser[/dim]", "localhost:3000", "docker logs")

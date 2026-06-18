@@ -39,7 +39,14 @@ def _build_groq() -> ChatGroq:
         model=GROQ_MODEL,
         api_key=GROQ_KEY,
         temperature=0.2,
-        max_tokens=2048,
+        # 2048 was occasionally too tight for responses with several list
+        # fields (fix_suggestions, recommendations, impact_chain, etc.) —
+        # a verbose completion could get cut off mid-JSON before the model
+        # reached the closing brace, which then fails to parse downstream.
+        # This alone doesn't guarantee no truncation ever happens again
+        # (hence the retry in ask_llm_json below), but it removes the most
+        # common, easily-avoidable cause of it.
+        max_tokens=3072,
     )
 
 
@@ -91,6 +98,56 @@ def ask_llm_from_template(template, context: str) -> str:
     """Invoke the LLM using a ChatPromptTemplate with a {context} variable."""
     messages = template.format_messages(context=context)
     return _invoke_with_fallback(messages)
+
+
+def ask_llm_json(system_prompt: str, user_prompt: str, max_retries: int = 1) -> tuple[dict, str]:
+    """
+    ask_llm() + parse_json_response() combined, with a retry on parse
+    failure specifically (not on network/auth errors, which still raise
+    immediately — retrying those just wastes time on something that will
+    fail the same way again).
+
+    Why this exists: Groq occasionally returns a response that gets cut
+    off before the JSON closes (hit a max_tokens boundary, or a transient
+    provider hiccup) — see the load_prediction failure logged 2026-06-17
+    21:02 ("Unterminated string..."). parse_json_response()'s fallback
+    chain (strip fences, extract largest {...}) can only ever work on a
+    SINGLE response — none of those steps can recover a response that was
+    truncated mid-stream, because the valid JSON simply isn't in the text
+    at all. The only real fix for that specific failure mode is asking
+    again. One retry catches the common transient case without masking a
+    persistently broken prompt — if it fails twice in a row, that's a
+    different problem (bad prompt, bad schema, provider outage) and we
+    surface the real error rather than retrying forever.
+
+    Returns (parsed_dict, raw_string_that_was_successfully_parsed) — every
+    one of agent_loop.py's six mode runners stores the raw string into
+    insert_agent_output's raw_llm_response field for audit/replay, so this
+    can't just return the dict alone without losing that. If a retry
+    happened, the raw string returned is the SECOND (successful) response,
+    not the first truncated one — the audit trail should reflect what
+    actually produced the result, not the attempt that failed.
+    """
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 2):  # e.g. max_retries=1 -> tries 1 and 2
+        raw = ask_llm(system_prompt, user_prompt)
+        try:
+            parsed = parse_json_response(raw)
+            return parsed, raw
+        except ValueError as e:
+            last_error = e
+            if attempt <= max_retries:
+                console.print(
+                    f"  [yellow]LLM returned malformed JSON "
+                    f"(attempt {attempt}/{max_retries + 1}) — retrying...[/yellow]"
+                )
+            continue
+
+    # All attempts exhausted — raise the most recent parse error so the
+    # caller's existing error handling (e.g. dashboard_api.py's job error
+    # capture) sees the same exception shape it already handles today.
+    raise last_error
 
 
 # ── Pydantic output schemas ───────────────────────────────────────────────────

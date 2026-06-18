@@ -27,19 +27,28 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 console = Console()
 
-PORTS = {
-    "payment_service":      3001,
-    "cart_service":         3002,
-    "notification_service": 3003,
-    "auth_service":         3004,
-    "inventory_service":    3005,
-    "gateway_service":      3006,
+# Same base-URL convention as collector/collector.py's SERVICES dict —
+# services/app.py now serves all 6 services on ONE port under path
+# prefixes (e.g. /payment/degrade) instead of the old one-port-per-service
+# model (3001-3006). Sharing the MOCK_SERVICES_BASE_URL env var with the
+# collector means both files point at the same place with one shared
+# setting — important once this moves to Railway and the base URL
+# becomes a Railway-internal hostname instead of localhost.
+_BASE_URL = os.getenv("MOCK_SERVICES_BASE_URL", "http://localhost:8000")
+
+PREFIXES = {
+    "payment_service":      "payment",
+    "cart_service":         "cart",
+    "notification_service": "notification",
+    "auth_service":         "auth",
+    "inventory_service":    "inventory",
+    "gateway_service":      "gateway",
 }
 
 
 def _post(service: str, endpoint: str, json: dict = None, params: dict = None):
-    port = PORTS[service]
-    url  = f"http://localhost:{port}/{endpoint}"
+    prefix = PREFIXES[service]
+    url    = f"{_BASE_URL}/{prefix}/{endpoint}"
     try:
         r = httpx.post(url, json=json or {}, params=params or {}, timeout=3.0)
         return r.json()
@@ -71,7 +80,7 @@ def scenario_surge():
     """Simulate Black Friday surge — tests load prediction."""
     console.print("\n[bold magenta]Scenario 3: Black Friday Traffic Surge (5x)[/bold magenta]")
     console.print("  Surging all services at 5x normal traffic...")
-    for svc in PORTS:
+    for svc in PREFIXES:
         _post(svc, "surge", params={"multiplier": 5.0})
     console.print("  All services under surge — agent should recommend scaling.\n")
 
@@ -87,7 +96,7 @@ def scenario_gateway_outage():
 def scenario_recover_all():
     """Recover all services to normal."""
     console.print("\n[bold green]Recovering all services...[/bold green]")
-    for svc in PORTS:
+    for svc in PREFIXES:
         result = _post(svc, "recover")
         if result:
             console.print(f"  [green]✓[/green] {svc} recovered")
@@ -96,7 +105,7 @@ def scenario_recover_all():
 
 def main():
     console.rule("[bold]SRE Agent — Incident Simulator[/bold]")
-    console.print("Make sure services are running: [bold]python -m services.service_runner[/bold]\n")
+    console.print("Make sure services are running: [bold]python -m services.app[/bold]\n")
 
     scenarios = {
         "1": ("Payment gradual degradation (predictive alert)",  scenario_gradual_degradation),

@@ -9,24 +9,79 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # Scrape all 6 mock microservices
-  # host.docker.internal lets Prometheus (in Docker) reach
-  # services running on your local machine
-  - job_name: "sre_services"
+  # Scrape all 6 mock microservices.
+  #
+  # services/app.py now runs all 6 as ONE process on ONE port, each
+  # mounted under its own path prefix (/payment, /cart, etc.) instead
+  # of the old one-port-per-service model (3001-3006). Prometheus only
+  # supports a single metrics_path per scrape JOB (not per target within
+  # a job), so the old "one job, six targets" shape no longer works —
+  # each service now needs its OWN job, sharing the same host:port but
+  # pointing at a different metrics_path.
+  #
+  # host.docker.internal lets Prometheus (in Docker) reach the unified
+  # services process running on your local machine, on port 8000 —
+  # matching services/app.py's default PORT.
+  #
+  # IMPORTANT: relabel_configs below sets ONLY `instance`, deliberately
+  # NOT `service_name`. Every metric (sre_request_duration_ms,
+  # sre_error_rate_percent, etc.) already carries a correct service_name
+  # label baked in at the source by base_service.py's own Prometheus
+  # client code. If a target_label also named service_name were added
+  # here, Prometheus's default label-collision behavior (honor_labels:
+  # false) renames the scraped label to exported_service_name and
+  # replaces it with this target label instead — meaning every query,
+  # dashboard, and alert rule written against `service_name` would
+  # silently be reading the relabel's value, not the app's authoritative
+  # one, and the original would still exist under a different, easy-to-
+  # miss name. Two labels carrying the identical value isn't WRONG here
+  # (we'd set it to the same string anyway), but it's redundant and
+  # fragile — don't add it back.
+
+  - job_name: "sre_payment_service"
+    metrics_path: "/payment/metrics"
     static_configs:
-      - targets:
-          - "host.docker.internal:3001"
-          - "host.docker.internal:3002"
-          - "host.docker.internal:3003"
-          - "host.docker.internal:3004"
-          - "host.docker.internal:3005"
-          - "host.docker.internal:3006"
+      - targets: ["host.docker.internal:8000"]
     relabel_configs:
-      # Extract service name from port for cleaner labels
-      - source_labels: [__address__]
-        regex: ".*:(\\d+)"
-        target_label: port
-      - source_labels: [__address__]
-        regex: "host.docker.internal:(\\d+)"
-        replacement: "${1}"
-        target_label: instance
+      - target_label: instance
+        replacement: "payment_service"
+
+  - job_name: "sre_cart_service"
+    metrics_path: "/cart/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    relabel_configs:
+      - target_label: instance
+        replacement: "cart_service"
+
+  - job_name: "sre_notification_service"
+    metrics_path: "/notification/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    relabel_configs:
+      - target_label: instance
+        replacement: "notification_service"
+
+  - job_name: "sre_auth_service"
+    metrics_path: "/auth/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    relabel_configs:
+      - target_label: instance
+        replacement: "auth_service"
+
+  - job_name: "sre_inventory_service"
+    metrics_path: "/inventory/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    relabel_configs:
+      - target_label: instance
+        replacement: "inventory_service"
+
+  - job_name: "sre_gateway_service"
+    metrics_path: "/gateway/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    relabel_configs:
+      - target_label: instance
+        replacement: "gateway_service"

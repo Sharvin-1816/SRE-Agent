@@ -83,7 +83,23 @@ def _record_trigger(service_name: str):
     _last_triggered[service_name] = datetime.now(timezone.utc)
 
 
-def _log(source: str, alerts: list, triggered: bool, reason: str):
+def _record_webhook_log(source: str, alerts: list, triggered: bool, reason: str):
+    """
+    Append to the in-memory recent-webhooks deque (used by GET
+    /webhook/status to show recent activity in the dashboard/CLI).
+
+    Named _record_webhook_log, NOT _log — this file also has
+    `_log = _get_logger("webhook")` near the top (the structured JSON
+    logger shipped to Loki). A function here previously named `_log`
+    silently overwrote that assignment at module load time, since both
+    shared the same name in the same module namespace. Every call to
+    `_log.info(...)` in _process_alerts() then crashed with
+    AttributeError: 'function' object has no attribute 'info' — meaning
+    every webhook received has been failing to log to Loki since this
+    bug was introduced, even though the webhook processing itself
+    (alert parsing, DB writes, agent triggering) kept working, since
+    that logic runs in separate try/except blocks before the crash.
+    """
     _recent_log.appendleft({
         "received_at": datetime.now(timezone.utc).isoformat(),
         "source":      source,
@@ -148,7 +164,7 @@ def _process_alerts(alerts: list[dict], source: str) -> dict:
     else:
         console.print(f"  Agent trigger: NO ({reason})")
 
-    _log(source, alerts, should_trigger, reason)
+    _record_webhook_log(source, alerts, should_trigger, reason)
 
     return {
         "received":  len(alerts),

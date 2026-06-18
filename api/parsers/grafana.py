@@ -43,6 +43,33 @@ _SEVERITY_LABEL_CANDIDATES = [
     "severity", "priority", "level", "alertseverity",
 ]
 
+# Grafana's own built-in meta-alerts — these fire when something is wrong
+# with ALERTING ITSELF (a datasource stopped returning data, a query
+# errored, evaluation timed out), not because any of our 6 mock services
+# actually degraded. They carry no `service` label (there's no real
+# service to attach one to) and an alertname like "DatasourceNoData" or
+# "DatasourceError" — which, without this filter, falls through
+# _extract_service()'s alertname-guessing fallback and gets treated as a
+# literal service name. normaliser.py's cleanup then appends "_service"
+# to whatever's left, producing a fictitious "datasourcenodata_service"
+# that the agent ran full RCA/prediction/blast-radius cycles against and
+# even stored as a permanent memory pattern — pure noise, plus wasted
+# LLM calls, plus polluted long-term memory.
+#
+# Matched case-insensitively against the alertname label. This list
+# covers Grafana's documented built-in alert names; if a new one shows
+# up in practice, add it here.
+_GRAFANA_META_ALERTNAMES = {
+    "datasourcenodata",
+    "datasourceerror",
+    "datasourceslow",
+}
+
+
+def _is_grafana_meta_alert(labels: dict) -> bool:
+    alertname = labels.get("alertname", "").lower()
+    return alertname in _GRAFANA_META_ALERTNAMES
+
 
 def _extract_service(labels: dict) -> str:
     for key in _SERVICE_LABEL_CANDIDATES:
@@ -139,6 +166,13 @@ def parse(payload: dict) -> list[dict]:
 
         labels      = alert.get("labels", {})
         annotations = alert.get("annotations", {})
+
+        # Skip Grafana's own built-in meta-alerts (DatasourceNoData, etc.)
+        # — these are about Grafana's alerting pipeline itself, not about
+        # any of our 6 real services. See _GRAFANA_META_ALERTNAMES above
+        # for why this matters.
+        if _is_grafana_meta_alert(labels):
+            continue
 
         service  = _extract_service(labels)
         severity = _extract_severity(labels)

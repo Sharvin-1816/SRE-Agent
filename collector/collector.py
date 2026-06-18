@@ -55,13 +55,25 @@ console = Console()
 
 # ── Service registry ──────────────────────────────────────────────────────────
 
+# Base URL of the unified mock-services process (services/app.py), which
+# now serves all 6 services on ONE port under path prefixes instead of
+# the old one-port-per-service model (localhost:3001..3006).
+#
+# Configurable via MOCK_SERVICES_BASE_URL so the upcoming Railway
+# deployment step is just an environment variable change here, not
+# another code edit — once the mock services move to Railway, this
+# becomes that service's Railway-internal private hostname instead of
+# localhost. Defaults to the correct value for local dev against
+# `python -m services.app`.
+_BASE_URL = os.getenv("MOCK_SERVICES_BASE_URL", "http://localhost:8000")
+
 SERVICES = {
-    "payment_service":      "http://localhost:3001",
-    "cart_service":         "http://localhost:3002",
-    "notification_service": "http://localhost:3003",
-    "auth_service":         "http://localhost:3004",
-    "inventory_service":    "http://localhost:3005",
-    "gateway_service":      "http://localhost:3006",
+    "payment_service":      f"{_BASE_URL}/payment",
+    "cart_service":         f"{_BASE_URL}/cart",
+    "notification_service": f"{_BASE_URL}/notification",
+    "auth_service":         f"{_BASE_URL}/auth",
+    "inventory_service":    f"{_BASE_URL}/inventory",
+    "gateway_service":      f"{_BASE_URL}/gateway",
 }
 
 POLL_INTERVAL  = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
@@ -348,8 +360,29 @@ def poll_all_services():
                 )
                 anomalies.append((service_name, signal, score))
         except Exception as e:
-            console.print(f"[yellow]  Anomaly check error for {service_name}: {e}[/yellow]")
-            _log.error("Anomaly check failed", service=service_name, error=str(e))
+            # This except block's own error-reporting must never be able
+            # to raise itself — if it did, the exception would propagate
+            # straight past this function (an exception raised inside an
+            # except block isn't caught by that same except), defeating
+            # the entire point of this try/except: keeping one service's
+            # anomaly-detection failure from killing the whole scheduled
+            # poll job. This happened for real on 2026-06-18 — a Unicode
+            # emoji in an anomaly message crashed console.print on
+            # Windows' cp1252 terminal, which crashed THIS except block,
+            # which crashed poll_all_services() entirely, silently
+            # stopping anomaly detection for the rest of the session.
+            # start.py now forces UTF-8 stdout so this specific cause
+            # shouldn't recur, but this nested try/except remains as a
+            # defense against ANY future console.print failure here,
+            # for any reason.
+            try:
+                console.print(f"[yellow]  Anomaly check error for {service_name}: {e}[/yellow]")
+            except Exception:
+                pass
+            try:
+                _log.error("Anomaly check failed", service=service_name, error=str(e))
+            except Exception:
+                pass
 
         results.append((service_name, row))
 

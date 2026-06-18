@@ -5,8 +5,39 @@ Generates vector embeddings using HuggingFaceEmbeddings from langchain-huggingfa
 Model: all-MiniLM-L6-v2 (384 dimensions, runs locally, no API calls)
 """
 
-import numpy as np
+import os
+
+# MUST be set before transformers/langchain_huggingface is imported anywhere
+# in the process — both libraries decide whether to attempt loading
+# TensorFlow at import time, deep inside their own module graph, not at
+# any point code calling them controls. Setting this here (rather than
+# relying on .env + load_dotenv() running first in whichever entry point
+# happens to start the process) guarantees it's set regardless of import
+# order across main.py / start.py / dashboard_api.py / etc.
+#
+# Why this is needed at all: on this project's dev machine (Windows,
+# Python 3.13), TensorFlow itself is broken — DLL load failure unrelated
+# to this codebase (matches transformers GitHub issue #40292, same
+# failure on the same Python/OS combination). transformers' import chain
+# attempts to import TensorFlow as a side effect of importing
+# sentence_transformers, even though this project only ever uses the
+# PyTorch backend. USE_TF=0 stops that attempt at the source. The
+# newer TRANSFORMERS_NO_TF flag is deliberately NOT used here because
+# it's confirmed unreliable in current transformers versions on Python
+# 3.13 (same GitHub issue) — USE_TF is the older flag and was the one
+# actually confirmed working in this project (2026-06-18 manual test).
+#
+# Without this, every embed() call silently fails through both the
+# HuggingFaceEmbeddings path and the SentenceTransformer fallback path
+# (both fail for the same underlying TensorFlow reason), landing on the
+# "No embedding library found" error even though the real libraries ARE
+# installed — semantic memory retrieval then always uses the recency
+# fallback instead, which works but loses the actual similarity-based
+# retrieval this file exists to provide.
+os.environ.setdefault("USE_TF", "0")
+
 from rich.console import Console
+import numpy as np
 
 console = Console()
 
