@@ -91,9 +91,16 @@ AGENT_MIN_SCORE = float(os.getenv("AGENT_MIN_SCORE", "30"))
 # Score at which the agent triggers regardless of cooldown
 AGENT_ALWAYS_SCORE = float(os.getenv("AGENT_ALWAYS_SCORE", "80"))
 
-# In-memory cooldown registry
-# Key: service_name  Value: (last_triggered_at, last_score)
-_cooldown: dict[str, tuple[datetime, float]] = {}
+# Cooldown registry is now SHARED with api/webhook_receiver.py via
+# agent/trigger_registry.py — see that module's docstring for why.
+# Previously this file kept its own local `_cooldown` dict, completely
+# invisible to webhook_receiver.py's equivalent dict, which let the same
+# real incident trigger two independent, simultaneous full agent runs
+# (one from this collector's anomaly detection, one from the matching
+# Grafana webhook alert that fired moments later for the same metric).
+from agent.trigger_registry import should_trigger as _in_cooldown_shared
+from agent.trigger_registry import record_trigger as _record_trigger_shared
+import agent.trigger_registry as _trigger_registry_module
 
 
 def _compute_anomaly_score(signal: dict) -> float:
@@ -140,39 +147,20 @@ def _compute_anomaly_score(signal: dict) -> float:
 
 def _in_cooldown(service_name: str, current_score: float) -> tuple[bool, str]:
     """
-    Check whether a service is in cooldown.
-
-    Returns (suppressed: bool, reason: str).
-
-    Cooldown is overridden when:
-      - Score exceeds AGENT_ALWAYS_SCORE (genuine escalation)
-      - Service is DOWN (severity = critical)
-      - Score has increased by more than 20 points since last trigger
-        (situation is getting worse, not stable)
+    Check whether a service is in cooldown — now delegates to the
+    SHARED registry in agent/trigger_registry.py, consulted by both
+    this collector and api/webhook_receiver.py. See that module's
+    docstring for why a shared registry matters: without it, a webhook
+    alert and a collector-detected anomaly for the same real incident
+    could each independently decide "no prior trigger" and both launch
+    a full agent run within the same minute.
     """
-    entry = _cooldown.get(service_name)
-    if not entry:
-        return False, "no prior trigger"
-
-    last_triggered, last_score = entry
-    elapsed_minutes = (datetime.now(timezone.utc) - last_triggered).total_seconds() / 60
-
-    if elapsed_minutes >= COOLDOWN_MINUTES:
-        return False, f"cooldown expired ({elapsed_minutes:.1f} min ago)"
-
-    if current_score >= AGENT_ALWAYS_SCORE:
-        return False, f"score {current_score} exceeds always-trigger threshold ({AGENT_ALWAYS_SCORE})"
-
-    if current_score - last_score >= 20:
-        return False, f"severity escalated ({last_score} → {current_score})"
-
-    remaining = COOLDOWN_MINUTES - elapsed_minutes
-    return True, f"cooldown active — {remaining:.1f} min remaining (last score: {last_score})"
+    return _in_cooldown_shared(service_name, current_score)
 
 
 def _record_trigger(service_name: str, score: float):
-    """Record that the agent was triggered for this service."""
-    _cooldown[service_name] = (datetime.now(timezone.utc), score)
+    """Record that the agent was triggered for this service (shared registry)."""
+    _record_trigger_shared(service_name, score)
 
 
 # ── Poll a single service ─────────────────────────────────────────────────────
@@ -299,7 +287,7 @@ def _print_poll_summary(results: list[tuple[str, dict]]):
         mem = row["memory_pct"]
 
         # Show cooldown indicator in service name if active
-        cd_entry = _cooldown.get(service_name)
+        cd_entry = _trigger_registry_module.active_cooldowns().get(service_name)
         cd_indicator = ""
         if cd_entry:
             elapsed = (datetime.now(timezone.utc) - cd_entry[0]).total_seconds() / 60

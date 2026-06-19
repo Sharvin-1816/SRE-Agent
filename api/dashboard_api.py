@@ -331,26 +331,218 @@ def get_job(job_id: str):
 
 @app.get("/api/status")
 def system_status():
-    """
-    Quick snapshot for the dashboard's landing page: live service health
-    plus whether Prometheus is reachable. Reuses the same data sources the
-    CLI 'status' command uses, just returned as JSON instead of a Rich table.
-    """
     from db.database import get_latest_metric_per_service
-
     rows = get_latest_metric_per_service()
-
     try:
         from agent.prometheus_adapter import is_available as prometheus_available
         prom_up = prometheus_available()
     except Exception:
         prom_up = False
-
     return {
         "prometheus_available": prom_up,
         "services": rows,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ── Recent agent decisions (full records from Supabase) ────────────────────
+
+@app.get("/api/decisions")
+def get_decisions(limit: int = 20):
+    """Full agent output records for the activity feed."""
+    try:
+        from db.database import get_agent_outputs
+        rows = get_agent_outputs(since_hours=48)
+        return {"decisions": rows[:limit]}
+    except Exception as e:
+        return {"decisions": [], "error": str(e)}
+
+
+# ── Context store ──────────────────────────────────────────────────────────
+
+@app.get("/api/context")
+def get_context():
+    """Return all saved operator context entries."""
+    try:
+        from db.database import list_context_entries
+        return {"contexts": list_context_entries()}
+    except Exception as e:
+        return {"contexts": [], "error": str(e)}
+
+
+class ContextAddRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/context")
+def add_context(req: ContextAddRequest):
+    """Add a new operator context entry."""
+    try:
+        from db.database import add_user_context
+        add_user_context(req.text.strip())
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/context/{context_id}")
+def delete_context(context_id: str):
+    """Delete a context entry by id."""
+    try:
+        from db.database import delete_context_entry
+        delete_context_entry(context_id)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Memory patterns ────────────────────────────────────────────────────────
+
+@app.get("/api/memory")
+def get_memory():
+    """Return all long-term memory patterns."""
+    try:
+        from db.database import db
+        result = (
+            db().table("agent_memory_patterns")
+            .select("*")
+            .order("occurrence_count", desc=True)
+            .execute()
+        )
+        return {"patterns": result.data or []}
+    except Exception as e:
+        return {"patterns": [], "error": str(e)}
+
+
+# ── Webhook receiver status ────────────────────────────────────────────────
+
+@app.get("/api/webhooks")
+def get_webhooks():
+    """Proxy the webhook receiver's status endpoint."""
+    import httpx
+    try:
+        webhook_port = int(os.getenv("WEBHOOK_PORT", "5001"))
+        r = httpx.get(f"http://localhost:{webhook_port}/webhook/status", timeout=3.0)
+        return r.json()
+    except Exception as e:
+        return {"status": "unreachable", "error": str(e), "recent_webhooks": []}
+
+
+# ── Simulate incident ──────────────────────────────────────────────────────
+
+class SimulateRequest(BaseModel):
+    scenario: str  # "degrade", "cascade", "surge", "outage", "recover"
+    service: Optional[str] = None
+    intensity: float = 0.6
+    multiplier: float = 5.0
+
+
+@app.post("/api/simulate")
+def simulate_incident(req: SimulateRequest):
+    """Trigger a demo incident scenario on the mock services."""
+    import httpx
+    base = os.getenv("MOCK_SERVICES_BASE_URL", "http://localhost:8000")
+    services = ["payment","cart","notification","auth","inventory","gateway"]
+    results = {}
+
+    try:
+        if req.scenario == "recover":
+            for svc in services:
+                r = httpx.post(f"{base}/{svc}/recover", timeout=3.0)
+                results[svc] = "recovered" if r.status_code == 200 else "failed"
+
+        elif req.scenario == "degrade":
+            svc = (req.service or "payment").replace("_service","")
+            r = httpx.post(f"{base}/{svc}/degrade",
+                json={"intensity": req.intensity, "duration_seconds": 300}, timeout=3.0)
+            results[svc] = "degraded" if r.status_code == 200 else "failed"
+
+        elif req.scenario == "surge":
+            for svc in services:
+                r = httpx.post(f"{base}/{svc}/surge",
+                    params={"multiplier": req.multiplier}, timeout=3.0)
+                results[svc] = "surging" if r.status_code == 200 else "failed"
+
+        elif req.scenario == "cascade":
+            r1 = httpx.post(f"{base}/payment/degrade",
+                json={"intensity": 0.9, "duration_seconds": 300}, timeout=3.0)
+            r2 = httpx.post(f"{base}/cart/degrade",
+                json={"intensity": 0.5, "duration_seconds": 300}, timeout=3.0)
+            results = {"payment": "degraded" if r1.status_code==200 else "failed",
+                       "cart": "degraded" if r2.status_code==200 else "failed"}
+
+        elif req.scenario == "outage":
+            r = httpx.post(f"{base}/gateway/degrade",
+                json={"intensity": 1.0, "duration_seconds": 300}, timeout=3.0)
+            results = {"gateway": "down" if r.status_code==200 else "failed"}
+
+        return {"ok": True, "results": results, "scenario": req.scenario}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Loki proxy (fixes browser CORS restrictions) ──────────────────────────
+
+@app.get("/api/logs")
+def proxy_loki(
+    component: str = "all",
+    level: str = "all",
+    search: str = "",
+    limit: int = 200,
+):
+    """
+    Proxy Loki queries through the API so the browser doesn't hit CORS.
+    The dashboard fetches /api/logs instead of localhost:3100 directly.
+    """
+    import httpx
+    loki_url = os.getenv("LOKI_URL", "http://localhost:3100")
+    now = int(datetime.now(timezone.utc).timestamp() * 1e9)
+    start = now - int(3600 * 1e9)
+    query = '{job=~"sre_.*"}' if component == "all" else f'{{component="{component}"}}'
+
+    try:
+        r = httpx.get(
+            f"{loki_url}/loki/api/v1/query_range",
+            params={"query": query, "limit": limit, "start": start, "end": now},
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return {"logs": [], "loki_ok": False, "error": f"Loki returned status {r.status_code}"}
+
+        data = r.json()
+        entries = []
+        for stream in (data.get("data", {}).get("result", [])):
+            comp = stream.get("stream", {}).get("component", "unknown")
+            for ts, line in stream.get("values", []):
+                # Only structured JSON log lines belong in this viewer.
+                # The same log files also contain raw Rich console output
+                # (the periodic service-status table, "⚠ ANOMALY" banners,
+                # etc.) meant for human eyes in a terminal — those aren't
+                # JSON and have no real "level"/"message"/"timestamp"
+                # fields, so showing them here just fragments one visual
+                # table into dozens of nonsense rows (a lone "|", a half
+                # a row of dashes, etc). Skip anything that doesn't parse
+                # as JSON rather than wrapping it as a fake entry.
+                try:
+                    parsed = __import__("json").loads(line)
+                except Exception:
+                    continue
+                parsed["_comp"] = comp
+                parsed["_ts"] = int(ts)
+                entries.append(parsed)
+
+        entries.sort(key=lambda x: x.get("_ts", 0), reverse=True)
+
+        # Filter
+        if level != "all":
+            entries = [e for e in entries if e.get("level") == level]
+        if search:
+            sl = search.lower()
+            entries = [e for e in entries if sl in __import__("json").dumps(e).lower()]
+
+        return {"logs": entries[:limit], "loki_ok": True}
+    except Exception as e:
+        return {"logs": [], "loki_ok": False, "error": str(e)}
 
 
 # ── Entry point ──────────────────────────────────────────────────────────

@@ -270,6 +270,13 @@ def main():
     parser = argparse.ArgumentParser(description="SRE Agent — start all components")
     parser.add_argument("--no-docker",   action="store_true", help="Skip docker-compose up")
     parser.add_argument("--no-webhook",  action="store_true", help="Skip webhook receiver")
+    parser.add_argument("--headless",    action="store_true",
+        help="Run background services only (mock services, collector, webhook) "
+             "without the interactive CLI. Use this when the dashboard is the "
+             "primary interface — the dashboard talks to the agent directly "
+             "via dashboard_api.py, but still needs mock services + the "
+             "collector running in the background to generate real anomalies "
+             "for it to detect and analyze. Stop with Ctrl+C same as normal mode.")
     args = parser.parse_args()
 
     from rich.console import Console
@@ -326,9 +333,26 @@ def main():
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # 5. Agent CLI — runs in foreground
-    from main import main as agent_main
-    agent_main()
+    if args.headless:
+        # No interactive CLI — the dashboard (dashboard_api.py, run
+        # separately on port 5050) is the primary interface instead.
+        # Block the main thread here so the process stays alive and the
+        # daemon threads above (services/collector/webhook) keep
+        # running; without this the function would return and the
+        # process would exit immediately, killing those threads with it.
+        console.print(
+            "[bold green]Running headless[/bold green] — no interactive CLI. "
+            "Background services only.\n"
+            "[dim]Use the dashboard (python -m api.dashboard_api) as the "
+            "primary interface.[/dim]\n"
+            "[dim]Press Ctrl+C to stop.[/dim]\n"
+        )
+        while not stop_event.is_set():
+            time.sleep(1)
+    else:
+        # 5. Agent CLI — runs in foreground
+        from main import main as agent_main
+        agent_main()
 
 
 if __name__ == "__main__":

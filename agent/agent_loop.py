@@ -16,9 +16,9 @@ Loop:
 """
 
 import os
+import sys
 import json
 import time
-import threading
 from datetime import datetime, timezone
 from rich.console import Console
 from rich.panel import Panel
@@ -28,7 +28,39 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent.llm_adapter import ask_llm, ask_llm_json, parse_json_response
+
+def is_interactive() -> bool:
+    """
+    True only when a real human is at a real terminal that can answer a
+    Prompt.ask() call. False in every other case this function runs in:
+
+    - start.py --headless (no CLI at all, sys.stdin isn't a real tty)
+    - webhook-triggered runs (agent_loop runs inside a background thread
+      spawned by api/webhook_receiver.py's _trigger_agent(), which has no
+      controlling terminal of its own regardless of whether some OTHER
+      thread in the same process happens to be running the interactive CLI)
+    - dashboard-triggered jobs (api/dashboard_api.py's job system runs
+      agent_loop functions in worker threads, same situation)
+    - the collector's own automatic anomaly-triggered runs
+
+    Before this existed, _handle_context_gap()'s Prompt.ask() blocked
+    forever in every one of these cases — there was no human able to type
+    a response, so the LLM call that started the whole analysis just
+    never returned. This surfaced as RCA/prediction jobs that appeared to
+    take "very very long" and then silently completed nothing on the
+    dashboard, because the work was actually stuck on a blocking stdin
+    read deep inside agent_loop.py, invisible to the dashboard's job
+    polling and invisible to whoever triggered it unless they happened to
+    be watching the exact terminal where start.py's CLI (if any) was
+    running.
+    """
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+from agent.llm_adapter import ask_llm, parse_json_response
 from agent.prompts import (
     RCA_SYSTEM, PREDICT_SYSTEM, LOAD_SYSTEM,
     ALERT_GROUPING_SYSTEM, HEALTH_QUERY_SYSTEM, BLAST_RADIUS_SYSTEM
@@ -50,29 +82,6 @@ from db.database import (
 console = Console()
 CONFIDENCE_THRESHOLD = int(os.getenv("AGENT_CONFIDENCE_THRESHOLD", "75"))
 _log = _get_logger("agent")
-
-# Interactivity is thread-local, not a single shared module-level flag.
-# Each background thread (every dashboard job runs in its own thread —
-# see api/dashboard_api.py's _run_job) gets its own independent copy of
-# this value. That means two concurrent jobs can never interfere with
-# each other's interactive/non-interactive state, no matter how many run
-# at once. The CLI (main.py) runs on the main thread and never touches
-# this at all, so it always sees the default: interactive=True.
-_thread_state = threading.local()
-
-
-def _is_interactive() -> bool:
-    """True unless the current thread explicitly opted out (dashboard jobs)."""
-    return getattr(_thread_state, "interactive", True)
-
-
-def set_interactive(value: bool):
-    """
-    Called by api/dashboard_api.py at the start of a job to disable the
-    blocking 'ask the user a clarifying question' step for THIS THREAD
-    only — never affects any other concurrently running job or the CLI.
-    """
-    _thread_state.interactive = value
 
 
 def _get_time_of_day(hour: int) -> str:
@@ -214,22 +223,23 @@ def _display_blast_radius(result: dict):
 
 def _handle_context_gap(result: dict, system_prompt: str, user_prompt: str) -> dict:
     """
-    If LLM confidence is low, ask the user for more context via CLI.
-    Save the answer to the context store and re-run.
-
-    In non-interactive mode (dashboard API jobs), there is no terminal to
-    prompt, so we skip straight to returning the original low-confidence
-    result with a flag the dashboard can surface to the user instead of
-    blocking forever on input that will never arrive.
+    If LLM confidence is low, ask the user for more context via CLI —
+    but ONLY when a human is actually present to answer (see
+    is_interactive() above). In every non-interactive case (headless
+    mode, webhook-triggered runs, dashboard job threads, automatic
+    collector-triggered runs), Prompt.ask() would block forever waiting
+    for stdin input that will never arrive, silently hanging the entire
+    analysis with no error and no way for the dashboard or webhook
+    caller to know anything is wrong. Proceeding with the LLM's
+    existing (lower-confidence) result is strictly better than hanging
+    indefinitely — the result still gets returned, the confidence score
+    still accurately reflects that the agent had a gap, and the caller
+    can see that in the UI rather than waiting on a frozen job forever.
     """
-    question = result.get("context_question", "Do you have any additional context?")
-
-    if not _is_interactive():
-        result["needs_more_context"] = True
-        result["context_question"]   = question
-        result["_skipped_clarification"] = True
-        _log.info("Context gap skipped (non-interactive job)", question=question[:200])
+    if not is_interactive():
         return result
+
+    question = result.get("context_question", "Do you have any additional context?")
 
     console.print(Panel(
         f"[bold yellow]The agent needs more information to proceed confidently.[/bold yellow]\n\n"
@@ -277,7 +287,8 @@ def run_rca(service_name: str, signal: dict) -> dict:
     pkg, prompt = build_for_rca(service_name, signal)
     prompt = prompt + memory_text
 
-    result, raw = ask_llm_json(RCA_SYSTEM, prompt)
+    raw    = ask_llm(RCA_SYSTEM, prompt)
+    result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
         result = _handle_context_gap(result, RCA_SYSTEM, prompt)
@@ -333,7 +344,8 @@ def run_prediction(service_name: str, signal: dict) -> dict:
     pkg, prompt = build_for_prediction(service_name, signal)
     prompt = prompt + memory_text
 
-    result, raw = ask_llm_json(PREDICT_SYSTEM, prompt)
+    raw    = ask_llm(PREDICT_SYSTEM, prompt)
+    result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
         result = _handle_context_gap(result, PREDICT_SYSTEM, prompt)
@@ -367,7 +379,8 @@ def run_load_prediction(service_name: str = None) -> dict:
     console.print("\n[bold]📊 Running load prediction...[/bold]")
     pkg, prompt = build_for_load_prediction(service_name)
 
-    result, raw = ask_llm_json(LOAD_SYSTEM, prompt)
+    raw    = ask_llm(LOAD_SYSTEM, prompt)
+    result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
         result = _handle_context_gap(result, LOAD_SYSTEM, prompt)
@@ -400,7 +413,8 @@ def run_alert_grouping() -> dict:
     # Retrieve the short→full UUID map attached by context_builder
     id_map = pkg.pop("_id_map", {})
 
-    result, raw = ask_llm_json(ALERT_GROUPING_SYSTEM, prompt)
+    raw    = ask_llm(ALERT_GROUPING_SYSTEM, prompt)
+    result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
         result = _handle_context_gap(result, ALERT_GROUPING_SYSTEM, prompt)
@@ -438,7 +452,8 @@ def run_health_query(question: str) -> dict:
     console.print(f"\n[bold]💬 Health query: {question}[/bold]")
     pkg, prompt = build_for_health_query(question)
 
-    result, raw = ask_llm_json(HEALTH_QUERY_SYSTEM, prompt)
+    raw    = ask_llm(HEALTH_QUERY_SYSTEM, prompt)
+    result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
         result = _handle_context_gap(result, HEALTH_QUERY_SYSTEM, prompt)
@@ -477,7 +492,8 @@ def run_blast_radius(service_name: str, signal: dict = None) -> dict:
     pkg, prompt = build_for_blast_radius(service_name, signal)
     prompt = prompt + memory_text
 
-    result, raw = ask_llm_json(BLAST_RADIUS_SYSTEM, prompt)
+    raw    = ask_llm(BLAST_RADIUS_SYSTEM, prompt)
+    result = parse_json_response(raw)
 
     if result.get("needs_more_context") and result.get("confidence", 100) < CONFIDENCE_THRESHOLD:
         result = _handle_context_gap(result, BLAST_RADIUS_SYSTEM, prompt)

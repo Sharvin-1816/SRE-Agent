@@ -264,7 +264,20 @@ class BaseService:
         intens = self._intensity if self._degrading else 0.0
 
         if self._degrading:
-            rt  = self._noisy(self.base_rt * (1 + intens * 12), self.rt_noise * (1 + intens * 3))
+            # Fixed floor (intens * 3000ms) added on top of the multiplicative
+            # scaling. Pure multiplication (base_rt * 13) was too weak for
+            # low-baseline services — gateway_service's base_rt=45 only
+            # reached ~585ms at full intensity, which can land BELOW other
+            # services' own time-of-day-inflated normal range (up to 1.3x
+            # during peak hours), making a deliberate full outage simulation
+            # look like nothing happened at all. Real outages don't scale
+            # proportionally to a service's normal speed — a struggling
+            # service hits roughly the same absolute slowdown (timeouts,
+            # retry storms, connection pool exhaustion) regardless of how
+            # fast it normally is. The floor guarantees intensity=1.0 always
+            # produces a multi-second response time, unambiguously anomalous
+            # for any service regardless of its base_rt.
+            rt  = self._noisy(self.base_rt * (1 + intens * 12) + intens * 3000, self.rt_noise * (1 + intens * 3))
             er  = self._clamp(self._noisy(self.base_er * (1 + intens * 10), self.er_noise * 3), 0, 100)
             tp  = self._noisy(self.base_tp * max(0.05, 1 - intens * 0.85), self.tp_noise)
             cpu = self._clamp(self._noisy(self.base_cpu * (1 + intens * 0.8), 5), 0, 100)

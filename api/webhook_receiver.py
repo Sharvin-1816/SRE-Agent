@@ -60,27 +60,40 @@ app.add_middleware(
 
 # ── Deduplication window ──────────────────────────────────────────────────────
 
+# Cooldown is now SHARED with collector.py via agent/trigger_registry.py
+# — see that module's docstring for why. Previously this file kept its
+# own local `_last_triggered` dict, completely invisible to collector.py's
+# equivalent dict, which let the same real incident trigger two
+# independent, simultaneous full agent runs (one from a Grafana webhook
+# alert, one from the collector's own anomaly detection moments later
+# for the same underlying metric spike).
+#
+# DEDUP_WINDOW_MINUTES is no longer used for the actual cooldown decision
+# (the shared registry's AGENT_COOLDOWN_MINUTES governs that now) but is
+# kept as a still-reported config value on GET /webhook/status for
+# continuity with anything that already reads it from that endpoint.
 DEDUP_WINDOW_MINUTES = int(os.getenv("WEBHOOK_DEDUP_MINUTES", "5"))
-_last_triggered: dict[str, datetime] = {}
+from agent.trigger_registry import (
+    should_trigger as _should_trigger_shared,
+    record_trigger as _record_trigger_shared,
+    active_cooldowns as _active_cooldowns_shared,
+)
 _recent_log: deque = deque(maxlen=50)
 
 
 def _should_trigger_agent(service_name: str) -> tuple[bool, str]:
-    now  = datetime.now(timezone.utc)
-    last = _last_triggered.get(service_name)
-
-    if last is None:
-        return True, "first alert for this service"
-
-    elapsed = (now - last).total_seconds() / 60
-    if elapsed >= DEDUP_WINDOW_MINUTES:
-        return True, f"last trigger was {elapsed:.1f} min ago"
-
-    return False, f"deduplicated — same service triggered {elapsed:.1f} min ago"
+    # _should_trigger_shared() returns (suppressed, reason) — True means
+    # "suppress, don't run". This function's name and every call site in
+    # this file (`if should_trigger: ...`) use the OPPOSITE polarity —
+    # True means "yes, please trigger". Must invert the boolean here, or
+    # every legitimate trigger (including "no prior trigger" - the
+    # correct signal to proceed) gets silently treated as "don't run".
+    suppressed, reason = _should_trigger_shared(service_name, current_score=50.0)
+    return (not suppressed), reason
 
 
 def _record_trigger(service_name: str):
-    _last_triggered[service_name] = datetime.now(timezone.utc)
+    _record_trigger_shared(service_name, score=50.0)
 
 
 def _record_webhook_log(source: str, alerts: list, triggered: bool, reason: str):
@@ -261,7 +274,7 @@ def webhook_status():
         "dedup_window_mins": DEDUP_WINDOW_MINUTES,
         "active_cooldowns": {
             svc: f"{((datetime.now(timezone.utc) - ts).total_seconds() / 60):.1f} min ago"
-            for svc, ts in _last_triggered.items()
+            for svc, (ts, score) in _active_cooldowns_shared().items()
         },
         "recent_webhooks": list(_recent_log),
     }
